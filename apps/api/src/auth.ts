@@ -1,7 +1,7 @@
 // Phone OTP login → JWT. Guards and role decorator.
 import {
   BadRequestException, Body, CanActivate, Controller, createParamDecorator, ExecutionContext, HttpCode, Injectable,
-  Post, SetMetadata, UnauthorizedException, ForbiddenException, HttpException, HttpStatus,
+  Post, SetMetadata, UnauthorizedException, ForbiddenException, HttpException, HttpStatus, Ip,
 } from '@nestjs/common';
 
 class TooManyRequestsException extends HttpException {
@@ -50,8 +50,19 @@ const hash = (phone: string, code: string) => createHmac('sha256', config.jwtSec
 export class AuthController {
   constructor(private db: PrismaService, private jwt: JwtService, private sms: SmsService) {}
 
+  /** Per-IP sliding window: stops one client spraying codes at many numbers (SMS costs money). */
+  private static ipHits = new Map<string, number[]>();
+  private ipAllowed(ip: string) {
+    const now = Date.now(), win = 15 * 60e3;
+    const hits = (AuthController.ipHits.get(ip) ?? []).filter(t => now - t < win);
+    if (hits.length >= config.otpPerIpPer15Min) return false;
+    hits.push(now); AuthController.ipHits.set(ip, hits);
+    return true;
+  }
+
   @Post('otp/request') @HttpCode(200)
-  async requestOtp(@Body() { phone }: RequestOtpDto) {
+  async requestOtp(@Body() { phone }: RequestOtpDto, @Ip() ip: string) {
+    if (!this.ipAllowed(ip || 'unknown')) throw new TooManyRequestsException('Too many requests from this network. Try again later.');
     const recent = await this.db.otpCode.count({ where: { phone, createdAt: { gt: new Date(Date.now() - 15 * 60e3) } } });
     if (recent >= 5) throw new TooManyRequestsException('Too many codes requested. Try again in 15 minutes.');
     const code = String(randomInt(0, 1e6)).padStart(6, '0');

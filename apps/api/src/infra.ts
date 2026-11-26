@@ -14,9 +14,13 @@ export const config = {
   razorpayKeyId: process.env.RAZORPAY_KEY_ID || '',
   razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET || '',
   pushDriver: (process.env.PUSH_DRIVER || 'expo') as 'expo' | 'log' | 'memory',
+  placesDriver: (process.env.PLACES_DRIVER || 'osm') as 'osm' | 'off',
   expoAccessToken: process.env.EXPO_ACCESS_TOKEN || '', // only if "enhanced push security" is on in Expo
   dispatchTickMs: +(process.env.DISPATCH_TICK_MS || 1000),
   offerTtlSec: 20,
+  lateGraceMin: +(process.env.LATE_GRACE_MIN ?? 10), // minutes past the promised arrival before the customer can switch for free
+  topRatedMin: 4.5,
+  otpPerIpPer15Min: +(process.env.OTP_PER_IP ?? 20),
   searchTimeoutSec: 180,
   radiusSteps: [[0, 8], [15, 15], [30, 30], [45, 50]] as [number, number][], // [elapsed s, km]
 };
@@ -144,6 +148,43 @@ export class PushService {
       // Tickets come back in the same order; drop tokens for uninstalled apps.
       const dead = (out.data || []).map((t: any, j: number) => (t.status === 'error' && t.details?.error === 'DeviceNotRegistered' ? batch[j].to : null)).filter(Boolean);
       if (dead.length) await this.db.pushToken.deleteMany({ where: { token: { in: dead } } });
+    }
+  }
+}
+
+// ---------------------------------------------------------------- nearby garages (OpenStreetMap via Overpass)
+export interface Garage { name: string; lat: number; lng: number; km: number; phone?: string }
+
+@Injectable()
+export class PlacesService {
+  private log = new Logger('Places');
+  private cache = new Map<string, { at: number; data: Garage[] }>();
+  /** Real car-repair shops near a point. Cached 30 min per ~1 km cell. Returns [] if OSM is unreachable,
+   *  and the app falls back to "choose on map". */
+  async garages(lat: number, lng: number): Promise<Garage[]> {
+    const key = `${lat.toFixed(2)}:${lng.toFixed(2)}`;
+    const hit = this.cache.get(key);
+    if (hit && Date.now() - hit.at < 30 * 60_000) return hit.data;
+    if (config.placesDriver === 'off') return [];
+    const q = `[out:json][timeout:8];(node["shop"="car_repair"](around:20000,${lat},${lng});way["shop"="car_repair"](around:20000,${lat},${lng}););out center 60;`;
+    try {
+      const res = await fetch('https://overpass-api.de/api/interpreter', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'OnSpot/0.1 (roadside assistance app)' },
+        body: 'data=' + encodeURIComponent(q), signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) throw new Error(`overpass ${res.status}`);
+      const out: any = await res.json();
+      const data: Garage[] = (out.elements || [])
+        .map((e: any) => ({ lat: e.lat ?? e.center?.lat, lng: e.lon ?? e.center?.lon, name: e.tags?.name, phone: e.tags?.phone || e.tags?.['contact:phone'] }))
+        .filter((g: any) => g.lat != null && g.name)
+        .map((g: any) => ({ ...g, km: +(haversineKm({ lat, lng }, g) * PRICING.roadFactor).toFixed(1) }))
+        .sort((a: Garage, b: Garage) => a.km - b.km)
+        .slice(0, 6);
+      this.cache.set(key, { at: Date.now(), data });
+      return data;
+    } catch (e: any) {
+      this.log.warn(`garage lookup failed: ${e.message}`);
+      return [];
     }
   }
 }

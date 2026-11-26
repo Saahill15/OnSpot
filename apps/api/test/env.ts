@@ -6,3 +6,5 @@ process.env.JWT_SECRET = 'test-secret';
 process.env.OTP_DEV_ECHO = 'true';
 process.env.DISPATCH_TICK_MS = '300';
 process.env.PUSH_DRIVER = 'memory';
+process.env.OTP_PER_IP = '1000';
+process.env.PLACES_DRIVER = 'off'; // no network calls to OpenStreetMap in tests

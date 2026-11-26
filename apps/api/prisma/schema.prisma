@@ -125,6 +125,11 @@ model Job {
   providerPayout  Int?
   cancelReason    String?
   cancelFee       Int        @default(0)
+  tip             Int        @default(0) // 100% to the partner, on top of the locked fare
+  minRating       Float? // "top-rated pros only": dispatch only to verified pros at/above this rating
+  promisedBy      DateTime? // when the partner said they'd arrive (assignedAt + ETA); drives the late-arrival guard
+  lateAt          DateTime? // set when the partner is well past promisedBy
+  dispute         Dispute?
   createdAt       DateTime   @default(now())
   searchStartedAt DateTime   @default(now())
   assignedAt      DateTime?
@@ -187,6 +192,36 @@ model Payment {
   ref            String
   gatewayOrderId String?
   createdAt      DateTime @default(now())
+}
+
+enum DisputeReason {
+  OVERCHARGED
+  NO_SHOW
+  BAD_SERVICE
+  DAMAGE
+  SAFETY
+  OTHER
+}
+
+enum DisputeStatus {
+  OPEN
+  RESOLVED
+}
+
+/// "Report a problem" on a job. Ops resolve it, optionally with a refund.
+model Dispute {
+  id           String        @id @default(cuid())
+  jobId        String        @unique
+  job          Job           @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  reason       DisputeReason
+  details      String        @default("")
+  status       DisputeStatus @default(OPEN)
+  resolution   String?
+  refundAmount Int           @default(0)
+  createdAt    DateTime      @default(now())
+  resolvedAt   DateTime?
+
+  @@index([status])
 }
 
 model Rating {

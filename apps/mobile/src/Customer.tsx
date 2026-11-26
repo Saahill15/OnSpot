@@ -23,14 +23,20 @@ export default function Customer({ onSignOut }: { onSignOut: () => void }) {
   const [avail, setAvail] = useState<Record<string, { count: number; etaMin: number | null }>>({});
   const [sel, setSel] = useState<ServiceCode | null>(null);
   const [job, setJob] = useState<JobView | null>(null);
+  // Tow drop point: a real garage from the list, or a point the customer taps on the map.
+  const [drop, setDrop] = useState<Drop | null>(null);
+  const [pickingDrop, setPickingDrop] = useState(false);
+
+  /** Load the request that still needs attention (active, unpaid, or unrated). Also used to resync after a network drop. */
+  const loadCurrent = useCallback(() => api<JobView[]>('/jobs').then(list => {
+    const j = list.find(x => ACTIVE.includes(x.status) || x.status === 'COMPLETED' || (x.status === 'PAID' && !x.ratings.CUSTOMER));
+    setJob(prev => j ?? (prev && ACTIVE.includes(prev.status) ? list.find(x => x.id === prev.id) ?? prev : prev));
+  }).catch(() => {}), []);
 
   // boot: profile, any unfinished job, GPS
   useEffect(() => {
     api<Profile>('/me').then(setMe).catch(() => {});
-    api<JobView[]>('/jobs').then(list => {
-      const j = list.find(x => ACTIVE.includes(x.status) || x.status === 'COMPLETED' || (x.status === 'PAID' && !x.ratings.CUSTOMER));
-      if (j) setJob(j);
-    }).catch(() => {});
+    loadCurrent();
     locate(false);
   }, []);
   const locate = async (explicit: boolean) => {
@@ -42,6 +48,7 @@ export default function Customer({ onSignOut }: { onSignOut: () => void }) {
     } catch { if (explicit) toast('Could not get your location. Tap the map instead.', 'err'); }
   };
   useEffect(() => { api(`/jobs/availability?lat=${spot.lat}&lng=${spot.lng}`).then(setAvail).catch(() => {}); }, [spot.lat, spot.lng]);
+  useEffect(() => { setDrop(null); setPickingDrop(false); }, [sel, spot.lat, spot.lng]);
 
   // realtime
   useEffect(() => {
@@ -52,39 +59,49 @@ export default function Customer({ onSignOut }: { onSignOut: () => void }) {
         const m: Record<string, string> = { ASSIGNED: `${j.provider?.name} accepted · about ${j.eta} min away`, ARRIVED: `${j.provider?.name} has arrived. Share your start code.`, COMPLETED: 'Job done. Please review the bill.', NO_PROVIDER: 'No provider available right now' };
         if (m[j.status]) toast(m[j.status], j.status === 'NO_PROVIDER' ? 'err' : 'ok');
       }
+      if (prev && !prev.late && j.late) toast(`${j.provider?.name} is running late. You can switch for free.`, 'err');
       const last = j.messages?.[j.messages.length - 1];
       if (prev && last && (prev.messages?.length || 0) < (j.messages?.length || 0) && last.from === 'PROVIDER') toast(`${j.provider?.name}: ${last.text}`);
       return j;
     });
     const onLoc = (l: { jobId: string; lat: number; lng: number; eta: number }) => setJob(prev => prev && prev.id === l.jobId && prev.provider ? { ...prev, eta: l.eta, provider: { ...prev.provider, lat: l.lat, lng: l.lng } } : prev);
-    s.on(EVENTS.JOB_UPDATED, onJob); s.on(EVENTS.PROVIDER_LOCATION, onLoc);
-    return () => { s.off(EVENTS.JOB_UPDATED, onJob); s.off(EVENTS.PROVIDER_LOCATION, onLoc); };
+    // Highways drop signal: after a reconnect, re-read the job so no update is missed.
+    const onReconnect = () => { loadCurrent(); };
+    s.on(EVENTS.JOB_UPDATED, onJob); s.on(EVENTS.PROVIDER_LOCATION, onLoc); s.io.on('reconnect', onReconnect);
+    return () => { s.off(EVENTS.JOB_UPDATED, onJob); s.off(EVENTS.PROVIDER_LOCATION, onLoc); s.io.off('reconnect', onReconnect); };
   }, []);
 
   const markers = useMemo<MapMarker[]>(() => {
     const at = job ? job.pickup : spot;
     const m: MapMarker[] = [{ id: 'me', lat: at.lat, lng: at.lng, kind: 'me' }];
-    if (job?.drop) m.push({ id: 'drop', lat: job.drop.lat, lng: job.drop.lng, kind: 'drop' });
+    const d = job ? job.drop : sel === 'tow' ? drop : null;
+    if (d) m.push({ id: 'drop', lat: d.lat, lng: d.lng, kind: 'drop' });
     if (job?.provider?.lat != null && ACTIVE.includes(job.status)) m.push({ id: 'pro', lat: job.provider.lat, lng: job.provider.lng!, kind: 'assigned', service: job.service });
     return m;
-  }, [job, spot]);
+  }, [job, spot, drop, sel]);
   const route = job?.status === 'ASSIGNED' && job.provider?.lat != null ? [{ lat: job.provider.lat, lng: job.provider.lng! }, job.pickup] : null;
 
   let body: React.ReactNode;
   if (tab === 'activity') body = <Activity />;
   else if (tab === 'account') body = <Account me={me} setMe={setMe} onSignOut={onSignOut} />;
-  else if (job && job.status === 'SEARCHING') body = <Searching job={job} />;
-  else if (job && ACTIVE.includes(job.status)) body = <LiveTrip job={job} setJob={setJob} />;
+  else if (job && job.status === 'SEARCHING') body = <Searching job={job} me={me} />;
+  else if (job && ACTIVE.includes(job.status)) body = <LiveTrip job={job} setJob={setJob} me={me} />;
   else if (job && job.status === 'COMPLETED') body = <Bill job={job} setJob={setJob} />;
   else if (job && job.status === 'PAID' && !job.ratings.CUSTOMER) body = <RateJob job={job} setJob={setJob} />;
   else if (job) body = <Ended job={job} onDone={() => { setJob(null); setSel(null); }} onRetry={() => { setSel(job.service); setJob(null); }} />;
-  else if (sel) body = <QuoteScreen service={sel} spot={spot} me={me} onBack={() => setSel(null)} onCreated={setJob} onShield={() => setTab('account')} />;
+  else if (sel) body = <QuoteScreen service={sel} spot={spot} me={me} drop={drop} setDrop={setDrop} pickingDrop={pickingDrop} setPickingDrop={setPickingDrop} onBack={() => setSel(null)} onCreated={setJob} onShield={() => setTab('account')} />;
   else body = <Home spot={spot} setSpot={setSpot} avail={avail} onPick={setSel} onLocate={() => locate(true)} />;
 
   return (
     <View style={{ flex: 1, backgroundColor: '#fff' }}>
-      {tab === 'help' && <Map height={height * 0.36} center={job ? job.pickup : spot} markers={markers} route={route}
-        onPress={p => { if (!job && !sel) setSpot({ ...p, label: 'Pinned on map' }); }} />}
+      {tab === 'help' && <View>
+        <Map height={height * 0.36} center={job ? job.pickup : spot} markers={markers} route={route}
+          onPress={p => {
+            if (pickingDrop) { setDrop({ ...p, name: 'Pinned drop point', km: 0 }); setPickingDrop(false); return; }
+            if (!job && !sel) setSpot({ ...p, label: 'Pinned on map' });
+          }} />
+        {pickingDrop && <View pointerEvents="none" style={{ position: 'absolute', top: 16, left: 16, right: 16, backgroundColor: C.ink, borderRadius: 12, padding: 12 }}><T s="sm" style={{ color: '#fff', textAlign: 'center' }}>Tap the map where the vehicle should be towed</T></View>}
+      </View>}
       <ScrollView style={{ flex: 1, marginTop: tab === 'help' ? -20 : 0, backgroundColor: '#fff', borderTopLeftRadius: tab === 'help' ? 22 : 0, borderTopRightRadius: tab === 'help' ? 22 : 0 }}
         contentContainerStyle={{ padding: 20, paddingTop: tab === 'help' ? 22 : 56, paddingBottom: 40 }} keyboardShouldPersistTaps="handled">
         {body}
@@ -145,23 +162,37 @@ function Home({ spot, setSpot, avail, onPick, onLocate }: { spot: LatLng & { lab
 }
 
 // ---------------------------------------------------------------- quote / booking
-function garages(at: LatLng) {
-  const off = (km: number, deg: number) => { const b = (deg * Math.PI) / 180; return { lat: at.lat + (km / 111) * Math.cos(b), lng: at.lng + (km / (111 * Math.cos((at.lat * Math.PI) / 180))) * Math.sin(b) }; };
-  return [{ name: 'OnSpot partner garage', ...off(4, 40), km: 5.4 }, { name: 'Highway Motors (24×7)', ...off(7.5, 160), km: 10.1 }, { name: 'Authorised service centre', ...off(12, 290), km: 16.2 }];
-}
-function QuoteScreen({ service, spot, me, onBack, onCreated, onShield }: { service: ServiceCode; spot: LatLng & { label: string }; me: Profile | null; onBack: () => void; onCreated: (j: JobView) => void; onShield: () => void }) {
+type Drop = LatLng & { name: string; km: number; phone?: string };
+
+function QuoteScreen({ service, spot, me, drop, setDrop, pickingDrop, setPickingDrop, onBack, onCreated, onShield }: {
+  service: ServiceCode; spot: LatLng & { label: string }; me: Profile | null; drop: Drop | null; setDrop: (d: Drop | null) => void;
+  pickingDrop: boolean; setPickingDrop: (b: boolean) => void; onBack: () => void; onCreated: (j: JobView) => void; onShield: () => void;
+}) {
   const s = SERVICE_BY_CODE[service];
-  const gs = useMemo(() => garages(spot), [spot.lat, spot.lng]);
-  const [dropIdx, setDropIdx] = useState(0);
+  const [garages, setGarages] = useState<Drop[] | null>(null);
   const [q, setQ] = useState<{ quote: Quote; nearby: number } | null>(null);
   const [notes, setNotes] = useState('');
+  const [topRated, setTopRated] = useState(false);
   const [busy, setBusy] = useState(false);
-  const drop = service === 'tow' ? gs[dropIdx] : null;
-  useEffect(() => { setQ(null); act(() => api('/jobs/quote', { body: { service, pickup: spot, drop: drop && { lat: drop.lat, lng: drop.lng } } })).then(r => r && setQ(r)); }, [service, spot.lat, spot.lng, dropIdx]);
+
+  // Towing: real nearby garages from OpenStreetMap. Pre-select the nearest; fall back to "choose on map".
+  useEffect(() => {
+    if (service !== 'tow') return;
+    setGarages(null);
+    api<Drop[]>(`/places/garages?lat=${spot.lat}&lng=${spot.lng}`).then(g => { setGarages(g); if (g[0]) setDrop(g[0]); }).catch(() => setGarages([]));
+  }, [service, spot.lat, spot.lng]);
+
+  const ready = service !== 'tow' || !!drop;
+  useEffect(() => {
+    setQ(null);
+    if (!ready) return;
+    act(() => api('/jobs/quote', { body: { service, pickup: spot, drop: drop && { lat: drop.lat, lng: drop.lng } } })).then(r => r && setQ(r));
+  }, [service, spot.lat, spot.lng, drop?.lat, drop?.lng]);
+
   const request = async () => {
     setBusy(true);
     const v = me?.vehicle;
-    const j = await act(() => api<JobView>('/jobs', { body: { service, pickup: { lat: spot.lat, lng: spot.lng, label: spot.label }, drop: drop && { lat: drop.lat, lng: drop.lng }, notes, vehicle: v ? `${v.model} ${v.plate}`.trim() : '' } }));
+    const j = await act(() => api<JobView>('/jobs', { body: { service, pickup: { lat: spot.lat, lng: spot.lng, label: spot.label }, drop: drop && { lat: drop.lat, lng: drop.lng }, notes, topRatedOnly: topRated, vehicle: v ? `${v.model} ${v.plate}`.trim() : '' } }));
     setBusy(false); if (j) onCreated(j);
   };
   return (
@@ -171,12 +202,20 @@ function QuoteScreen({ service, spot, me, onBack, onCreated, onShield }: { servi
         <IconCircle name={SERVICE_ICON[service]} /><View style={{ flex: 1 }}><T s="h2">{s.name}</T><T s="xs">{s.desc}</T></View>
       </Row>
       {service === 'tow' && <>
-        <T s="h3" style={{ marginBottom: 10 }}>Tow to</T>
-        {gs.map((g, i) => <Pressable key={i} onPress={() => setDropIdx(i)} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, borderRadius: 12, borderWidth: dropIdx === i ? 2 : 1, borderColor: dropIdx === i ? C.ink : C.line2, marginBottom: 8 }}>
-          <Icon name={dropIdx === i ? 'check-circle' : 'circle'} size={18} color={dropIdx === i ? C.ink : C.muted} /><View style={{ flex: 1 }}><T s="sm" style={{ fontWeight: '600' }}>{g.name}</T><T s="xs">{g.km.toFixed(1)} km away</T></View>
-        </Pressable>)}
+        <T s="h3" style={{ marginBottom: 4 }}>Tow to</T>
+        <T s="xs" style={{ marginBottom: 10 }}>Garages near you from OpenStreetMap. Call ahead at night to check they're open.</T>
+        {garages === null && <T s="sm" style={{ color: C.muted, marginBottom: 10 }}>Finding garages near you…</T>}
+        {garages?.length === 0 && <T s="sm" style={{ color: C.muted, marginBottom: 10 }}>No garages found nearby. Choose a drop point on the map.</T>}
+        {garages?.map(g => { const on = drop?.lat === g.lat && drop?.lng === g.lng; return (
+          <Pressable key={`${g.lat},${g.lng}`} onPress={() => setDrop(g)} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, borderRadius: 12, borderWidth: on ? 2 : 1, borderColor: on ? C.ink : C.line2, marginBottom: 8 }}>
+            <Icon name={on ? 'check-circle' : 'circle'} size={18} color={on ? C.ink : C.muted} />
+            <View style={{ flex: 1 }}><T s="sm" style={{ fontWeight: '600' }} numberOfLines={1}>{g.name}</T><T s="xs">{g.km} km away</T></View>
+            {g.phone && <Pressable onPress={() => Linking.openURL(`tel:${g.phone}`)} accessibilityLabel={`Call ${g.name}`}><IconCircle name="phone" size={34} /></Pressable>}
+          </Pressable>); })}
+        {drop && !garages?.some(g => g.lat === drop.lat && g.lng === drop.lng) && <Card soft><Row><Icon name="flag" size={16} /><T s="sm" style={{ flex: 1 }}>Drop point pinned on the map</T></Row></Card>}
+        <Button kind="ghost" small icon="map-pin" title={pickingDrop ? 'Tap the map above…' : 'Choose drop point on map'} onPress={() => setPickingDrop(!pickingDrop)} style={{ alignSelf: 'flex-start', paddingHorizontal: 0 }} />
       </>}
-      {!q ? <View style={{ height: 180, borderRadius: 14, backgroundColor: C.surface2, marginVertical: 12 }} /> : <>
+      {!ready ? null : !q ? <View style={{ height: 180, borderRadius: 14, backgroundColor: C.surface2, marginVertical: 12 }} /> : <>
         <Row gap={0} style={{ borderWidth: 1, borderColor: C.line, borderRadius: 14, marginVertical: 14 }}>
           {[[`${q.quote.etaMin} min`, 'arrival'], [String(q.nearby), 'pros nearby'], [q.quote.night ? 'Night' : 'Day', 'rates']].map(([b, l], i) =>
             <View key={l} style={{ flex: 1, alignItems: 'center', paddingVertical: 12, borderLeftWidth: i ? 1 : 0, borderLeftColor: C.line }}><T s="h3" style={{ fontSize: 18 }}>{b}</T><T s="xs">{l}</T></View>)}
@@ -186,19 +225,24 @@ function QuoteScreen({ service, spot, me, onBack, onCreated, onShield }: { servi
         <Card soft style={{ marginTop: 14 }}><Row style={{ alignItems: 'flex-start' }}><Icon name="lock" size={18} /><T s="sm" style={{ flex: 1, color: C.ink2 }}><T s="sm" style={{ fontWeight: '600' }}>This price is locked.</T> The provider can't charge more. Any parts or tolls appear here for you to approve or decline.</T></Row></Card>
         {!q.quote.shield && <Button kind="ghost" small title={`Save ${rupee(19)} on every request with Shield`} onPress={onShield} style={{ alignSelf: 'flex-start', paddingHorizontal: 0 }} />}
       </>}
+      <Pressable onPress={() => setTopRated(!topRated)} accessibilityRole="switch" accessibilityState={{ checked: topRated }} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, marginBottom: 6 }}>
+        <IconCircle name="award" size={38} bg={topRated ? C.ink : C.surface2} color={topRated ? '#fff' : C.ink} />
+        <View style={{ flex: 1 }}><T s="sm" style={{ fontWeight: '600' }}>Top-rated pros only</T><T s="xs">Verified pros rated 4.5★ or higher. May take a little longer.</T></View>
+        <View style={{ width: 46, height: 28, borderRadius: 14, backgroundColor: topRated ? C.ok : C.line2, padding: 3, alignItems: topRated ? 'flex-end' : 'flex-start' }}><View style={{ width: 22, height: 22, borderRadius: 11, backgroundColor: '#fff' }} /></View>
+      </Pressable>
       {me?.vehicle?.model ? <Row style={{ marginVertical: 8 }}><Icon name="truck" size={16} color={C.muted} /><T s="sm" style={{ color: C.muted }}>{me.vehicle.model} · {me.vehicle.plate}</T></Row> : null}
       <Input placeholder="Anything the provider should know? e.g. white Swift, front-left tyre" value={notes} onChangeText={setNotes} multiline style={{ minHeight: 64, textAlignVertical: 'top' }} />
       <Divider />
       <Row>
         <View style={{ flex: 1 }}><T s="h2" style={{ fontSize: 20 }}>{q ? rupee(q.quote.total) : '—'} <T s="sm" style={{ color: C.muted }}>total</T></T><Row gap={4}><Icon name="lock" size={12} color={C.ink2} /><T s="xs" style={{ color: C.ink2, textDecorationLine: 'underline' }}>Price locked</T></Row></View>
-        <Button title={q && !q.nearby ? 'No pros nearby' : 'Request'} onPress={request} disabled={!q || !q.nearby} loading={busy} style={{ minWidth: 140 }} />
+        <Button title={!ready ? 'Choose a drop point' : q && !q.nearby ? 'No pros nearby' : 'Request'} onPress={request} disabled={!q || !q.nearby} loading={busy} style={{ minWidth: 140 }} />
       </Row>
     </>
   );
 }
 
 // ---------------------------------------------------------------- searching
-function Searching({ job }: { job: JobView }) {
+function Searching({ job, me }: { job: JobView; me: Profile | null }) {
   const pulse = useMemo(() => new Animated.Value(0), []);
   const [cancelOpen, setCancelOpen] = useState(false);
   useEffect(() => { Animated.loop(Animated.timing(pulse, { toValue: 1, duration: 1800, easing: Easing.out(Easing.quad), useNativeDriver: Platform.OS !== 'web' })).start(); }, []);
@@ -209,10 +253,55 @@ function Searching({ job }: { job: JobView }) {
         <IconCircle name={SERVICE_ICON[job.service]} size={58} bg={C.accent} color="#fff" />
       </View>
       <T s="h2" style={{ textAlign: 'center' }}>Finding your {SERVICE_BY_CODE[job.service].name.toLowerCase()} pro</T>
-      <T s="sm" style={{ textAlign: 'center', color: C.muted, marginTop: 6 }}>Searching within {job.radiusKm || 8} km · sent to {job.offeredCount} nearby pro{job.offeredCount === 1 ? '' : 's'}</T>
+      <T s="sm" style={{ textAlign: 'center', color: C.muted, marginTop: 6 }}>Searching within {job.radiusKm || 8} km · sent to {job.offeredCount} nearby pro{job.offeredCount === 1 ? '' : 's'}{job.topRatedOnly ? ' · top-rated only' : ''}</T>
       <Card soft style={{ marginTop: 18 }}><Row><Icon name="lock" size={16} /><T s="sm" style={{ flex: 1 }}>Fare locked</T><T s="h3">{rupee(job.total)}</T></Row></Card>
+      <SafetyCard job={job} me={me} />
       {cancelOpen ? <CancelPanel job={job} onClose={() => setCancelOpen(false)} /> : <Button kind="ghost" title="Cancel request · free" onPress={() => setCancelOpen(true)} />}
     </>
+  );
+}
+
+/** Highway safety while waiting: the most dangerous part of a breakdown is standing next to traffic.
+ *  Includes an SMS fallback for when there's no mobile data. */
+function SafetyCard({ job, me }: { job: JobView; me: Profile | null }) {
+  const [open, setOpen] = useState(true);
+  if (SERVICE_BY_CODE[job.service].group !== 'Roadside') return null;
+  const tips: [IconName, string][] = [
+    ['alert-triangle', 'Hazard lights on. Park as far to the left as you safely can.'],
+    ['users', 'Everyone out and behind the crash barrier, not inside or in front of the car.'],
+    ['alert-octagon', 'Place a warning triangle about 50 m behind the car if you have one.'],
+    ['shield', 'Share your start code only with the pro whose name and number plate match the app.'],
+  ];
+  const smsLocation = () => {
+    const to = me?.contacts?.[0]?.phone ?? '';
+    const body = `I'm stuck and waiting for roadside help (OnSpot). My location: https://maps.google.com/?q=${job.pickup.lat},${job.pickup.lng}${job.pickup.label ? ` (${job.pickup.label})` : ''}`;
+    Linking.openURL(`sms:${to}${Platform.OS === 'ios' ? '&' : '?'}body=${encodeURIComponent(body)}`).catch(() => toast('Could not open SMS', 'err'));
+  };
+  return (
+    <View style={{ borderWidth: 1, borderColor: C.line, borderRadius: 16, padding: 16, marginBottom: 12 }}>
+      <Pressable onPress={() => setOpen(!open)}><Row><IconCircle name="shield" size={34} bg={C.warnSoft} color={C.warn} /><T s="h3" style={{ flex: 1 }}>Stay safe while you wait</T><Icon name={open ? 'chevron-up' : 'chevron-down'} size={18} color={C.muted} /></Row></Pressable>
+      {open && <View style={{ marginTop: 12, gap: 10 }}>
+        {tips.map(([i, t]) => <Row key={t} style={{ alignItems: 'flex-start' }}><Icon name={i} size={16} color={C.ink2} /><T s="sm" style={{ flex: 1, color: C.ink2 }}>{t}</T></Row>)}
+        <Button small kind="outline" icon="message-square" title={me?.contacts?.length ? `No internet? SMS my location to ${me.contacts[0].name}` : 'No internet? Send my location by SMS'} onPress={smsLocation} style={{ marginTop: 4 }} />
+      </View>}
+    </View>
+  );
+}
+
+/** Late-arrival guard: shown when the pro is well past the arrival time they accepted with. */
+function LateBanner({ job, setJob }: { job: JobView; setJob: (j: JobView) => void }) {
+  const [hidden, setHidden] = useState(false);
+  if (!job.late || hidden) return null;
+  const switchPro = async () => {
+    if (!(await confirm('Switch to another pro?', 'We will match you with the next nearest pro. It is free and your locked fare stays the same.', 'Switch'))) return;
+    const r = await act(() => api<JobView>(`/jobs/${job.id}/switch`, { body: {} }));
+    if (r) { setJob(r); toast('Finding you another pro…', 'ok'); }
+  };
+  return (
+    <View style={{ backgroundColor: C.warnSoft, borderRadius: 16, padding: 16, marginBottom: 14 }}>
+      <Row style={{ alignItems: 'flex-start' }}><Icon name="clock" size={18} color={C.warn} /><View style={{ flex: 1 }}><T s="h3">{job.provider?.name} is running late</T><T s="sm" style={{ color: C.ink2, marginTop: 2 }}>Switch to the next nearest pro for free. Your locked fare stays the same.</T></View></Row>
+      <Row style={{ marginTop: 12 }}><Button kind="dark" small title="Switch pro (free)" onPress={switchPro} style={{ flex: 1 }} /><Button kind="outline" small title="Keep waiting" onPress={() => setHidden(true)} style={{ flex: 1 }} /></Row>
+    </View>
   );
 }
 
@@ -231,7 +320,7 @@ function CancelPanel({ job, onClose }: { job: JobView; onClose: () => void }) {
 }
 
 // ---------------------------------------------------------------- live trip
-function LiveTrip({ job, setJob }: { job: JobView; setJob: (j: JobView) => void }) {
+function LiveTrip({ job, setJob, me }: { job: JobView; setJob: (j: JobView) => void; me: Profile | null }) {
   const p = job.provider!;
   const [chat, setChat] = useState(false);
   const [seen, setSeen] = useState(job.messages?.length || 0);
@@ -256,6 +345,7 @@ function LiveTrip({ job, setJob }: { job: JobView; setJob: (j: JobView) => void 
     <>
       <Row style={{ marginBottom: 14 }}><View style={{ flex: 1 }}><T s="label">{title}</T><T s="h1" style={{ fontSize: 30 }}>{big}</T></View><IconCircle name={SERVICE_ICON[job.service]} size={54} /></Row>
       <Steps status={job.status} />
+      <LateBanner job={job} setJob={setJob} />
       {pending.map(a => (
         <View key={a.id} style={{ borderWidth: 1, borderColor: C.ink, borderRadius: 16, padding: 16, marginBottom: 14 }}>
           <T s="label">Approval needed</T>
@@ -283,6 +373,7 @@ function LiveTrip({ job, setJob }: { job: JobView; setJob: (j: JobView) => void 
       {chat && <ChatPanel job={job} me="CUSTOMER" onSend={t => api(`/jobs/${job.id}/messages`, { body: { text: t } }).then(setJob)} />}
       {cancelOpen && <CancelPanel job={job} onClose={() => setCancelOpen(false)} />}
       <Card soft><Row><Icon name="lock" size={16} /><T s="sm" style={{ flex: 1 }}>Locked fare{extras ? ' + approved extras' : ''}</T><T s="h3">{rupee(job.total + extras)}</T></Row></Card>
+      {job.status === 'ASSIGNED' && <SafetyCard job={job} me={me} />}
       <Timeline job={job} />
       {job.status !== 'IN_PROGRESS' && !cancelOpen && <Button kind="ghost" title="Cancel request" onPress={() => setCancelOpen(true)} style={{ marginTop: 8 }} />}
     </>

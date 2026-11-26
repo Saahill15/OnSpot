@@ -6,7 +6,8 @@ import Redis from 'ioredis';
 import { PrismaClient } from '@prisma/client';
 import { EVENTS } from '@onspot/shared';
 import { createApp } from '../src/main';
-import { PushService } from '../src/infra';
+import { config, PushService } from '../src/infra';
+import { JobsService } from '../src/jobs.service';
 
 let app: INestApplication;
 let base: string;
@@ -241,5 +242,139 @@ describe('full job lifecycle', () => {
     expect(o.body.completed).toBe(1);
     expect(o.body.gmv).toBeGreaterThan(0);
     expect(o.body.matchRate).toBe(100);
+  });
+});
+
+describe('review fixes and new features', () => {
+  // Far from Lonavala (Nashik) so the partners from the earlier suite are out of range.
+  const SPOT = { lat: 20.0059, lng: 73.7897, label: 'Nashik Highway, near Dwarka circle' };
+  const DROP = { lat: 20.03, lng: 73.80 };
+  let admin: string, cust: { token: string; id: string }, a: { token: string; id: string }, b: { token: string; id: string };
+  const svc = () => app.get(JobsService) as any;
+
+  async function runToCompleted(service = 'puncture') {
+    const j = (await http().post('/v1/jobs').set(auth(cust.token)).send({ service, pickup: SPOT, ...(service === 'tow' ? { drop: DROP } : {}), night: false }).expect(201)).body;
+    await sleep(400);
+    let holder = a;
+    if ((await http().post(`/v1/jobs/${j.id}/accept`).set(auth(a.token))).status !== 200) { holder = b; await http().post(`/v1/jobs/${j.id}/accept`).set(auth(b.token)).expect(200); }
+    await http().post(`/v1/jobs/${j.id}/arrived`).set(auth(holder.token)).expect(200);
+    const code = (await http().get(`/v1/jobs/${j.id}`).set(auth(cust.token))).body.startCode;
+    await http().post(`/v1/jobs/${j.id}/start`).set(auth(holder.token)).send({ code }).expect(200);
+    await http().post(`/v1/jobs/${j.id}/complete`).set(auth(holder.token)).expect(200);
+    return { id: j.id as string, holder };
+  }
+
+  beforeAll(async () => {
+    admin = (await login('9999999999', 'ADMIN')).token;
+    cust = await login('9876500050', 'CUSTOMER', 'Neha Joshi');
+    a = await makeProvider('9800000051', 'Arjun Nair', ['puncture', 'tow', 'battery'], SPOT, admin);
+    b = await makeProvider('9800000052', 'Deepak Yadav', ['puncture', 'tow', 'battery'], SPOT, admin);
+  });
+
+  it('cash is only "paid" after the partner confirms receiving it', async () => {
+    const { id, holder } = await runToCompleted();
+    const r = await http().post(`/v1/jobs/${id}/pay`).set(auth(cust.token)).send({ method: 'cash' }).expect(200);
+    expect(r.body.status).toBe('COMPLETED');
+    expect(r.body.payment.status).toBe('PENDING_CASH');
+    await http().post(`/v1/jobs/${id}/cash-received`).set(auth(cust.token)).expect(403); // the customer cannot confirm their own cash
+    const other = holder === a ? b : a;
+    await http().post(`/v1/jobs/${id}/cash-received`).set(auth(other.token)).expect(403);
+    const done = await http().post(`/v1/jobs/${id}/cash-received`).set(auth(holder.token)).expect(200);
+    expect(done.body.status).toBe('PAID');
+    expect(done.body.startCode).toBeUndefined();
+    expect(app.get(PushService).sent.some(m => m.userId === holder.id && m.title.startsWith('Collect ₹'))).toBe(true);
+  });
+
+  it('tips go 100% to the partner, once, within limits', async () => {
+    const { id, holder } = await runToCompleted();
+    await http().post(`/v1/jobs/${id}/tip`).set(auth(cust.token)).send({ amount: 50 }).expect(409); // not paid yet
+    await http().post(`/v1/jobs/${id}/pay`).set(auth(cust.token)).send({ method: 'upi' }).expect(200);
+    const before = (await http().get('/v1/provider/me').set(auth(holder.token))).body.provider.earnings;
+    await http().post(`/v1/jobs/${id}/tip`).set(auth(cust.token)).send({ amount: 5 }).expect(400);
+    const t = await http().post(`/v1/jobs/${id}/tip`).set(auth(cust.token)).send({ amount: 50 }).expect(200);
+    expect(t.body.tip).toBe(50);
+    await http().post(`/v1/jobs/${id}/tip`).set(auth(cust.token)).send({ amount: 50 }).expect(409);
+    const after = (await http().get('/v1/provider/me').set(auth(holder.token))).body.provider.earnings;
+    expect(after - before).toBe(50);
+  });
+
+  it('"report a problem" creates a dispute that ops can resolve with a capped refund', async () => {
+    const { id } = await runToCompleted();
+    await http().post(`/v1/jobs/${id}/pay`).set(auth(cust.token)).send({ method: 'upi' }).expect(200);
+    await http().post(`/v1/jobs/${id}/dispute`).set(auth(cust.token)).send({ reason: 'NOT_A_REASON' }).expect(400);
+    const r = await http().post(`/v1/jobs/${id}/dispute`).set(auth(cust.token)).send({ reason: 'OVERCHARGED', details: 'Asked for 200 extra in cash' }).expect(200);
+    expect(r.body.dispute.status).toBe('OPEN');
+    await http().post(`/v1/jobs/${id}/dispute`).set(auth(cust.token)).send({ reason: 'OTHER' }).expect(409);
+    const list = (await http().get('/v1/admin/disputes').set(auth(admin)).expect(200)).body;
+    const d = list.find((x: any) => x.job.id === id);
+    expect(d.reason).toBe('OVERCHARGED');
+    expect((await http().get('/v1/admin/overview').set(auth(admin))).body.openDisputes).toBeGreaterThanOrEqual(1);
+    await http().post(`/v1/admin/disputes/${d.id}/resolve`).set(auth(admin)).send({ resolution: 'Too much', refundAmount: d.job.maxRefund + 1 }).expect(400);
+    const res = await http().post(`/v1/admin/disputes/${d.id}/resolve`).set(auth(admin)).send({ resolution: 'Partner warned. Refunding 100.', refundAmount: 100 }).expect(200);
+    expect(res.body.dispute.status).toBe('RESOLVED');
+    expect(res.body.dispute.refundAmount).toBe(100);
+    expect(app.get(PushService).sent.some(m => m.userId === cust.id && m.title === '₹100 refund approved')).toBe(true);
+  });
+
+  it('late-arrival guard: free switch, and every other nearby partner is re-offered', async () => {
+    const [sa, sb] = await Promise.all([connect(a.token), connect(b.token)]);
+    const firstOfferB = waitFor<any>(sb, EVENTS.JOB_OFFER);
+    const j = (await http().post('/v1/jobs').set(auth(cust.token)).send({ service: 'battery', pickup: SPOT, night: false }).expect(201)).body;
+    await firstOfferB;
+    await http().post(`/v1/jobs/${j.id}/accept`).set(auth(a.token)).expect(200);
+    await http().post(`/v1/jobs/${j.id}/switch`).set(auth(cust.token)).expect(409); // not late yet
+    // Pretend the promised arrival time passed long ago; the dispatcher flags it on its next tick.
+    await db.job.update({ where: { id: j.id }, data: { promisedBy: new Date(Date.now() - 60 * 60_000) } });
+    await waitFor<any>(sa, EVENTS.JOB_UPDATED, x => x.id === j.id && x.late === true);
+    expect(app.get(PushService).sent.some(m => m.userId === cust.id && m.title.endsWith('is running late'))).toBe(true);
+    const reoffer = waitFor<any>(sb, EVENTS.JOB_OFFER, o => o.jobId === j.id);
+    const s = await http().post(`/v1/jobs/${j.id}/switch`).set(auth(cust.token)).expect(200);
+    expect(s.body.status).toBe('SEARCHING');
+    expect(s.body.late).toBe(false);
+    await reoffer; // B was offered before; the release must offer it again
+    await http().post(`/v1/jobs/${j.id}/accept`).set(auth(a.token)).expect(403); // the late partner cannot take it back
+    await http().post(`/v1/jobs/${j.id}/accept`).set(auth(b.token)).expect(200);
+    await http().post(`/v1/jobs/${j.id}/cancel`).set(auth(cust.token)).send({}).expect(200);
+  });
+
+  it('expired offers disappear on reopen and cannot be accepted', async () => {
+    const j = (await http().post('/v1/jobs').set(auth(cust.token)).send({ service: 'battery', pickup: SPOT, night: false }).expect(201)).body;
+    const me = (await http().get('/v1/provider/me').set(auth(a.token)).expect(200)).body;
+    const o = me.offers.find((x: any) => x.jobId === j.id);
+    expect(new Date(o.expiresAt).getTime() - Date.now()).toBeLessThanOrEqual(20_000);
+    svc().offerAt.get(j.id).set(a.id, Date.now() - 60_000); // the offer to A was sent a minute ago
+    expect((await http().get('/v1/provider/me').set(auth(a.token))).body.offers.some((x: any) => x.jobId === j.id)).toBe(false);
+    const r = await http().post(`/v1/jobs/${j.id}/accept`).set(auth(a.token)).expect(409);
+    expect(r.body.message).toMatch(/expired/);
+    await http().post(`/v1/jobs/${j.id}/cancel`).set(auth(cust.token)).send({}).expect(200);
+  });
+
+  it('"top-rated pros only" skips partners below 4.5 stars', async () => {
+    await db.provider.update({ where: { userId: b.id }, data: { rating: 4.1 } });
+    const j = (await http().post('/v1/jobs').set(auth(cust.token)).send({ service: 'battery', pickup: SPOT, night: false, topRatedOnly: true }).expect(201)).body;
+    expect(j.topRatedOnly).toBe(true);
+    const offeredTo = (await db.job.findUnique({ where: { id: j.id } }))!.offeredIds;
+    expect(offeredTo).toContain(a.id);
+    expect(offeredTo).not.toContain(b.id);
+    await http().post(`/v1/jobs/${j.id}/accept`).set(auth(b.token)).expect(403);
+    await http().post(`/v1/jobs/${j.id}/cancel`).set(auth(cust.token)).send({}).expect(200);
+    await db.provider.update({ where: { userId: b.id }, data: { rating: 4.8 } });
+  });
+
+  it('shows partners where and when demand happens', async () => {
+    const h = (await http().get('/v1/provider/hotspots').set(auth(a.token)).expect(200)).body;
+    expect(h.total).toBeGreaterThanOrEqual(5);
+    expect(h.hours).toHaveLength(24);
+    expect(h.hotspots[0].label).toBe(SPOT.label);
+    expect(h.hotspots[0].requests).toBeGreaterThanOrEqual(5);
+    await http().get('/v1/provider/hotspots').set(auth(cust.token)).expect(403);
+  });
+
+  it('limits login-code requests per network and serves garages without crashing offline', async () => {
+    expect((await http().get(`/v1/places/garages?lat=${SPOT.lat}&lng=${SPOT.lng}`).set(auth(cust.token)).expect(200)).body).toEqual([]);
+    const prev = config.otpPerIpPer15Min;
+    config.otpPerIpPer15Min = 0;
+    await http().post('/v1/auth/otp/request').send({ phone: '9876500099' }).expect(429);
+    config.otpPerIpPer15Min = prev;
   });
 });

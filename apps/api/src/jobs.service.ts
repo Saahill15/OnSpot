@@ -8,7 +8,7 @@ import {
 import { config, GeoService, PrismaService, PushService, RealtimeService, SmsService } from './infra';
 import type { AuthUser } from './auth';
 
-const FULL = { events: { orderBy: { at: 'asc' } }, addons: { orderBy: { createdAt: 'asc' } }, messages: { orderBy: { at: 'asc' } }, payment: true, ratings: true, customer: true, provider: { include: { user: true } } } satisfies Prisma.JobInclude;
+const FULL = { events: { orderBy: { at: 'asc' } }, addons: { orderBy: { createdAt: 'asc' } }, messages: { orderBy: { at: 'asc' } }, payment: true, ratings: true, dispute: true, customer: true, provider: { include: { user: true } } } satisfies Prisma.JobInclude;
 type FullJob = Prisma.JobGetPayload<{ include: typeof FULL }>;
 type Viewer = 'customer' | 'provider' | 'admin' | 'public';
 
@@ -33,7 +33,9 @@ export function jobView(j: FullJob, viewer: Viewer) {
     events: j.events.map(e => ({ text: e.text, at: e.at })),
     payment: j.payment && { method: j.payment.method, amount: j.payment.amount, status: j.payment.status, ref: j.payment.ref },
     ratings: Object.fromEntries(j.ratings.map(r => [r.by, { stars: r.stars, comment: r.comment }])),
-    cancelReason: j.cancelReason, cancelFee: j.cancelFee,
+    cancelReason: j.cancelReason, cancelFee: j.cancelFee, tip: j.tip,
+    topRatedOnly: j.minRating != null, promisedBy: j.promisedBy, late: !!j.lateAt,
+    dispute: viewer === 'customer' || viewer === 'admin' ? (j.dispute && { id: j.dispute.id, reason: j.dispute.reason, details: j.dispute.details, status: j.dispute.status, resolution: j.dispute.resolution, refundAmount: j.dispute.refundAmount, createdAt: j.dispute.createdAt }) : undefined,
     createdAt: j.createdAt, assignedAt: j.assignedAt, arrivedAt: j.arrivedAt, startedAt: j.startedAt, completedAt: j.completedAt, paidAt: j.paidAt,
   };
 }
@@ -44,6 +46,12 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
   private log = new Logger('Jobs');
   private timer?: NodeJS.Timeout;
   private ticking = false;
+  /** jobId → providerId → when the offer was sent. Offers expire after `offerTtlSec`. (Per-instance; move to Redis with BullMQ.) */
+  private offerAt = new Map<string, Map<string, number>>();
+  private offerExpired(jobId: string, providerId: string) {
+    const at = this.offerAt.get(jobId)?.get(providerId);
+    return at != null && Date.now() - at > (config.offerTtlSec + 5) * 1000; // 5 s grace for slow networks
+  }
   constructor(private db: PrismaService, private geo: GeoService, private rt: RealtimeService, private sms: SmsService, private push: PushService) {}
   /** Push to the customer about their request; `data.jobId` lets the app open the right screen on tap. */
   private tellCustomer(j: { id: string; customerId: string }, title: string, body: string) {
@@ -110,7 +118,7 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
     return { quote: q, nearby: near.count };
   }
 
-  async create(u: AuthUser, b: { service: string; pickup: LatLng & { label?: string }; drop?: LatLng | null; notes?: string; vehicle?: string; night?: boolean }) {
+  async create(u: AuthUser, b: { service: string; pickup: LatLng & { label?: string }; drop?: LatLng | null; notes?: string; vehicle?: string; night?: boolean; topRatedOnly?: boolean }) {
     if (!isServiceCode(b.service)) throw new BadRequestException('Unknown service');
     if (b.service === 'tow' && !b.drop) throw new BadRequestException('Choose where to tow the vehicle');
     const active = await this.db.job.findFirst({ where: { customerId: u.sub, status: { in: ACTIVE_STATUSES } } });
@@ -121,7 +129,8 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
         customerId: u.sub, service: b.service, pickupLat: b.pickup.lat, pickupLng: b.pickup.lng, pickupLabel: (b.pickup.label || '').slice(0, 120),
         dropLat: b.drop?.lat, dropLng: b.drop?.lng, notes: (b.notes || '').slice(0, 300), vehicle: (b.vehicle || '').slice(0, 60),
         quote: quote as unknown as Prisma.InputJsonValue, total: quote.total, platformFee: quote.platformFee,
-        startCode: String(randomInt(1000, 10000)), searchStartedAt: new Date(), events: { create: { text: `Request created · fare locked at ₹${quote.total}` } },
+        startCode: String(randomInt(1000, 10000)), searchStartedAt: new Date(), minRating: b.topRatedOnly ? config.topRatedMin : null,
+        events: { create: { text: `Request created · fare locked at ₹${quote.total}${b.topRatedOnly ? ` · top-rated pros only (${config.topRatedMin}★+)` : ''}` } },
       },
     });
     await this.tickJob(j.id); // dispatch immediately, don't wait for the next tick
@@ -135,7 +144,25 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
     try {
       const searching = await this.db.job.findMany({ where: { status: 'SEARCHING' }, select: { id: true } });
       for (const { id } of searching) await this.tickJob(id);
+      await this.checkLate();
     } finally { this.ticking = false; }
+  }
+
+  /** Late-arrival guard: a partner well past the arrival time they accepted with gets flagged once.
+   *  The customer is offered a free switch; ops see it live. */
+  private async checkLate() {
+    const cutoff = new Date(Date.now() - config.lateGraceMin * 60_000);
+    const late = await this.db.job.findMany({ where: { status: 'ASSIGNED', lateAt: null, promisedBy: { lt: cutoff } }, include: { provider: { include: { user: true } } } });
+    for (const j of late) {
+      const r = await this.db.job.updateMany({ where: { id: j.id, status: 'ASSIGNED', lateAt: null }, data: { lateAt: new Date() } });
+      if (!r.count) continue;
+      const mins = Math.round((Date.now() - j.promisedBy!.getTime()) / 60_000);
+      await this.event(j.id, `Partner is running late (${mins} min past the promised time) · customer can switch for free`);
+      this.tellCustomer(j, `${j.provider?.user.name ?? 'Your pro'} is running late`, 'Want someone else? Switch to the next nearest pro for free. Your locked fare stays the same.');
+      if (j.providerId) this.push.notify(j.providerId, { title: "You're running late", body: 'The customer can now switch to another pro. Message them or hurry, please.', data: { type: 'job', jobId: j.id }, channelId: 'jobs' });
+      this.rt.toAdmins('job.late', { jobId: j.id, provider: j.provider?.user.name, minutesLate: mins });
+      await this.broadcast(j.id);
+    }
   }
 
   private async tickJob(id: string) {
@@ -156,8 +183,17 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
     let changed = false;
     if (radius !== j.radiusKm) { await this.db.job.update({ where: { id }, data: { radiusKm: radius } }); await this.event(id, `Searching within ${radius} km`); changed = true; }
     const hits = await this.geo.index.nearby(j.service as ServiceCode, j.pickupLat, j.pickupLng, radius);
-    const fresh = hits.filter(h => !j.offeredIds.includes(h.id) && !j.declinedIds.includes(h.id) && h.id !== j.customerId);
+    let fresh = hits.filter(h => !j.offeredIds.includes(h.id) && !j.declinedIds.includes(h.id) && h.id !== j.customerId);
+    if (j.minRating != null && fresh.length) {
+      // "Top-rated pros only": the geo index has no ratings, so filter the candidates against the DB.
+      const ok = await this.db.provider.findMany({ where: { userId: { in: fresh.map(h => h.id) }, rating: { gte: j.minRating } }, select: { userId: true } });
+      const set = new Set(ok.map(o => o.userId));
+      fresh = fresh.filter(h => set.has(h.id));
+    }
     if (fresh.length) {
+      const sent = this.offerAt.get(id) ?? new Map<string, number>();
+      for (const h of fresh) sent.set(h.id, Date.now());
+      this.offerAt.set(id, sent);
       await this.db.job.update({ where: { id }, data: { offeredIds: { push: fresh.map(h => h.id) } } });
       const cust = await this.db.user.findUnique({ where: { id: j.customerId } });
       for (const h of fresh) {
@@ -185,10 +221,15 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
   async offersFor(providerId: string) {
     const jobs = await this.db.job.findMany({ where: { status: 'SEARCHING', offeredIds: { has: providerId }, NOT: { declinedIds: { has: providerId } } }, include: { customer: true } });
     const p = await this.db.provider.findUnique({ where: { userId: providerId } });
-    return jobs.map(j => ({
-      jobId: j.id, service: j.service, km: p?.lat != null ? +roadKm(p as LatLng, { lat: j.pickupLat, lng: j.pickupLng }).toFixed(1) : null, fare: j.total,
-      payout: providerPayout(j.total, j.platformFee), pickup: { lat: j.pickupLat, lng: j.pickupLng, label: j.pickupLabel }, customerName: j.customer.name,
-    }));
+    // Only offers still inside their window, with the real expiry (not a fresh 20 s on every app open).
+    return jobs.filter(j => !this.offerExpired(j.id, providerId)).map(j => {
+      const sentAt = this.offerAt.get(j.id)?.get(providerId) ?? Date.now();
+      return {
+        jobId: j.id, service: j.service, km: p?.lat != null ? +roadKm(p as LatLng, { lat: j.pickupLat, lng: j.pickupLng }).toFixed(1) : null, fare: j.total,
+        payout: providerPayout(j.total, j.platformFee), pickup: { lat: j.pickupLat, lng: j.pickupLng, label: j.pickupLabel }, customerName: j.customer.name,
+        expiresAt: new Date(sentAt + config.offerTtlSec * 1000).toISOString(),
+      };
+    });
   }
 
   // ------------------------------------------------------------ provider actions
@@ -197,16 +238,19 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
     if (!p || p.kycStatus !== 'VERIFIED' || !p.online) throw new ForbiddenException('Go online (with verified KYC) to accept jobs');
     const job = await this.db.job.findUnique({ where: { id } });
     if (!job?.offeredIds.includes(u.sub)) throw new ForbiddenException('This job was not offered to you');
+    if (this.offerExpired(id, u.sub)) throw new ConflictException('This offer has expired');
+    const eta = p.lat != null ? etaMinutes(roadKm(p as LatLng, { lat: job.pickupLat, lng: job.pickupLng })) : null;
     try {
       await this.db.$transaction(async tx => {
         // First accept wins: both conditional updates must succeed or the whole thing rolls back.
-        const a = await tx.job.updateMany({ where: { id, status: 'SEARCHING' }, data: { status: 'ASSIGNED', providerId: u.sub, assignedAt: new Date(), eta: p.lat != null ? etaMinutes(roadKm(p as LatLng, { lat: job.pickupLat, lng: job.pickupLng })) : null } });
+        const a = await tx.job.updateMany({ where: { id, status: 'SEARCHING' }, data: { status: 'ASSIGNED', providerId: u.sub, assignedAt: new Date(), eta, promisedBy: new Date(Date.now() + (eta ?? 15) * 60_000), lateAt: null } });
         if (!a.count) throw new ConflictException('Another provider already took this job');
         const b = await tx.provider.updateMany({ where: { userId: u.sub, activeJobId: null }, data: { activeJobId: id } });
         if (!b.count) throw new ConflictException('Finish your current job first');
       });
     } catch (e) { if (e instanceof ConflictException) throw e; throw new ConflictException('Could not accept this job'); }
     await this.geo.index.remove(u.sub);
+    this.offerAt.delete(id);
     const j = await this.load(id);
     await this.event(id, `${j.provider!.user.name} accepted · arriving in about ${j.eta ?? '?'} min`);
     this.tellCustomer(j, `${j.provider!.user.name} is on the way`, `Arriving in about ${j.eta ?? 'a few'} min. Tap to track live.`);
@@ -303,7 +347,65 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
       await this.db.payment.upsert({ where: { jobId: id }, create: { jobId: id, method, amount, status: 'CREATED', ref: order.id, gatewayOrderId: order.id }, update: { method, gatewayOrderId: order.id, status: 'CREATED' } });
       return { checkout: { keyId: config.razorpayKeyId, orderId: order.id, amount: amount * 100, currency: 'INR' } };
     }
+    if (method === 'cash') {
+      // Cash isn't "paid" until the partner confirms they received it; otherwise anyone could tap "cash" and walk away.
+      await this.db.payment.upsert({ where: { jobId: id }, create: { jobId: id, method, amount, status: 'PENDING_CASH', ref: 'CASH' }, update: { method, amount, status: 'PENDING_CASH', ref: 'CASH' } });
+      await this.event(id, `Customer chose to pay ₹${amount} in cash · waiting for partner to confirm`);
+      if (j.providerId) this.push.notify(j.providerId, { title: `Collect ₹${amount} in cash`, body: `Confirm in the app once ${j.customer.name} has paid you.`, data: { type: 'job', jobId: id }, channelId: 'jobs' });
+      return jobView(await this.broadcast(id), 'customer');
+    }
     return this.markPaid(id, method, amount, 'PAY' + randomBytes(4).toString('hex').toUpperCase());
+  }
+
+  /** Partner confirms the cash is in hand. Only then is the job PAID. */
+  async cashReceived(u: AuthUser, id: string) {
+    const j = await this.mustBeProvider(u, id, ['COMPLETED']);
+    if (j.payment?.status !== 'PENDING_CASH') throw new ConflictException('The customer has not chosen cash');
+    const v = await this.markPaid(id, 'cash', j.finalAmount!, 'CASH' + randomBytes(3).toString('hex').toUpperCase());
+    this.tellCustomer(j, 'Cash payment confirmed', `${j.provider!.user.name} confirmed receiving ₹${j.finalAmount}. Thanks!`);
+    return { ...v, startCode: undefined };
+  }
+
+  // ------------------------------------------------------------ tips (100% to the partner)
+  async tip(u: AuthUser, id: string, amount: number) {
+    const j = await this.mustBeCustomer(u, id, ['PAID']);
+    if (j.tip > 0) throw new ConflictException('You already tipped for this job');
+    const amt = Math.round(amount);
+    if (!(amt >= 10 && amt <= 2000)) throw new BadRequestException('Tip between ₹10 and ₹2,000');
+    // Production: charge via the gateway first (UPI collect); here the tip is recorded as paid.
+    await this.db.$transaction([
+      this.db.job.update({ where: { id }, data: { tip: amt } }),
+      this.db.provider.update({ where: { userId: j.providerId! }, data: { earnings: { increment: amt } } }),
+      this.db.jobEvent.create({ data: { jobId: id, text: `Customer tipped ₹${amt} · 100% to the partner` } }),
+    ]);
+    this.push.notify(j.providerId!, { title: `You got a ₹${amt} tip!`, body: `${j.customer.name} tipped you for the ${this.serviceName(j.service).toLowerCase()} job.`, data: { type: 'job', jobId: id }, channelId: 'jobs' });
+    return jobView(await this.broadcast(id), 'customer');
+  }
+
+  // ------------------------------------------------------------ "Report a problem" → dispute for ops
+  async dispute(u: AuthUser, id: string, reason: string, details = '') {
+    const j = await this.mustBeCustomer(u, id, ['COMPLETED', 'PAID', 'CANCELLED']);
+    if (!j.providerId) throw new BadRequestException('There is no partner on this request to report');
+    if (j.dispute) throw new ConflictException('You already reported a problem for this job. Ops will get back to you.');
+    await this.db.dispute.create({ data: { jobId: id, reason: reason as any, details: details.slice(0, 500) } });
+    await this.event(id, `Problem reported by customer (${reason.toLowerCase().replace('_', ' ')}) · ops reviewing`);
+    this.rt.toAdmins('dispute.created', { jobId: id });
+    await this.push.notifyAdmins({ title: `Problem reported: ${reason.toLowerCase().replace('_', ' ')}`, body: `${j.customer.name} · ${this.serviceName(j.service)} job with ${j.provider?.user.name}`, data: { type: 'dispute', jobId: id } });
+    return jobView(await this.broadcast(id), 'customer');
+  }
+
+  async resolveDispute(disputeId: string, resolution: string, refundAmount: number) {
+    const d = await this.db.dispute.findUnique({ where: { id: disputeId }, include: { job: true } });
+    if (!d) throw new NotFoundException('Dispute not found');
+    if (d.status === 'RESOLVED') throw new ConflictException('Already resolved');
+    const max = (d.job.finalAmount ?? 0) + d.job.cancelFee;
+    const refund = Math.round(refundAmount);
+    if (refund < 0 || refund > max) throw new BadRequestException(`Refund must be between ₹0 and ₹${max}`);
+    // Production: issue the refund through the gateway (Razorpay refunds API) and record its id.
+    await this.db.dispute.update({ where: { id: disputeId }, data: { status: 'RESOLVED', resolution: resolution.slice(0, 500), refundAmount: refund, resolvedAt: new Date() } });
+    await this.event(d.jobId, `Ops resolved the reported problem${refund ? ` · ₹${refund} refunded` : ''}`);
+    this.tellCustomer(d.job, refund ? `₹${refund} refund approved` : 'Your report was reviewed', resolution.slice(0, 140));
+    return jobView(await this.broadcast(d.jobId), 'admin');
   }
 
   async verifyRazorpay(u: AuthUser, b: { jobId: string; razorpay_order_id: string; razorpay_payment_id: string; razorpay_signature: string }) {
@@ -376,18 +478,67 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
     if (j.providerId === u.sub) {
       // Provider backs out: release and re-dispatch to others instead of failing the customer.
       if (!['ASSIGNED', 'ARRIVED'].includes(j.status)) throw new ConflictException('You cannot release the job now');
-      await this.db.$transaction([
-        this.db.job.update({ where: { id }, data: { status: 'SEARCHING', providerId: null, assignedAt: null, arrivedAt: null, eta: null, radiusKm: 0, searchStartedAt: new Date(), declinedIds: { push: u.sub } } }),
-        this.db.provider.update({ where: { userId: u.sub }, data: { activeJobId: null } }),
-        this.db.jobEvent.create({ data: { jobId: id, text: 'Provider released the job · finding you another provider' } }),
-      ]);
-      this.rt.toUser(u.sub, EVENTS.JOB_OFFER_REVOKED, { jobId: id });
-      await this.makeAvailable(u.sub);
+      await this.releaseToSearch(j, 'Provider released the job · finding you another provider');
       this.tellCustomer(j, 'Finding you another pro', `${j.provider!.user.name} couldn't make it. We're matching you with the next nearest pro.`);
       await this.broadcast(id);
       return { ok: true };
     }
     throw new ForbiddenException('Not your job');
+  }
+
+  /** Late-arrival guard: once flagged late, the customer may switch to another pro for free (same locked fare). */
+  async switchPro(u: AuthUser, id: string) {
+    const j = await this.mustBeCustomer(u, id, ['ASSIGNED']);
+    if (!j.lateAt) throw new ConflictException('You can switch for free once your pro is running late');
+    const old = j.provider!;
+    await this.releaseToSearch(j, `Customer switched pros because ${old.user.name} was late · finding the next nearest pro`);
+    this.push.notify(old.userId, { title: 'Job reassigned', body: `${j.customer.name} switched to another pro because you were running late.`, data: { type: 'job', jobId: id }, channelId: 'jobs' });
+    return jobView(await this.broadcast(id), 'customer');
+  }
+
+  /** Put an assigned job back into search, excluding the current partner, and re-offer it to everyone else nearby. */
+  private async releaseToSearch(j: FullJob, eventText: string) {
+    const pid = j.providerId!;
+    await this.db.$transaction([
+      // offeredIds is reset so partners who saw the first offer get notified again (declines are kept).
+      this.db.job.update({ where: { id: j.id }, data: { status: 'SEARCHING', providerId: null, assignedAt: null, arrivedAt: null, eta: null, promisedBy: null, lateAt: null, radiusKm: 0, searchStartedAt: new Date(), offeredIds: [], declinedIds: { push: pid } } }),
+      this.db.provider.update({ where: { userId: pid }, data: { activeJobId: null } }),
+      this.db.jobEvent.create({ data: { jobId: j.id, text: eventText } }),
+    ]);
+    this.offerAt.delete(j.id);
+    this.rt.toUser(pid, EVENTS.JOB_OFFER_REVOKED, { jobId: j.id });
+    await this.makeAvailable(pid);
+    await this.tickJob(j.id);
+  }
+
+  // ------------------------------------------------------------ partner demand hotspots
+  /** Where and when requests happened near the partner over the last 30 days, so they can wait in the right place. */
+  async hotspots(providerId: string) {
+    const p = await this.db.provider.findUniqueOrThrow({ where: { userId: providerId } });
+    const center = p.lat != null ? { lat: p.lat, lng: p.lng! } : { lat: 18.7546, lng: 73.4062 };
+    const d = 25 / 111; // ~25 km box, then exact distance filter
+    const jobs = await this.db.job.findMany({
+      where: { createdAt: { gt: new Date(Date.now() - 30 * 864e5) }, pickupLat: { gt: center.lat - d, lt: center.lat + d }, pickupLng: { gt: center.lng - d, lt: center.lng + d }, ...(p.services.length ? { service: { in: p.services } } : {}) },
+      select: { pickupLat: true, pickupLng: true, pickupLabel: true, createdAt: true, service: true, total: true },
+    });
+    const cells = new Map<string, { lat: number; lng: number; count: number; labels: Map<string, number>; value: number }>();
+    const hours = new Array(24).fill(0);
+    for (const j of jobs) {
+      if (roadKm(center, { lat: j.pickupLat, lng: j.pickupLng }) > 30) continue;
+      hours[j.createdAt.getHours()]++;
+      const key = `${Math.round(j.pickupLat / 0.02)}:${Math.round(j.pickupLng / 0.02)}`; // ~2 km cells
+      const c = cells.get(key) ?? { lat: 0, lng: 0, count: 0, labels: new Map(), value: 0 };
+      c.lat += j.pickupLat; c.lng += j.pickupLng; c.count++; c.value += j.total;
+      if (j.pickupLabel) c.labels.set(j.pickupLabel, (c.labels.get(j.pickupLabel) ?? 0) + 1);
+      cells.set(key, c);
+    }
+    const spots = [...cells.values()].sort((a, b) => b.count - a.count).slice(0, 5).map(c => {
+      const lat = c.lat / c.count, lng = c.lng / c.count;
+      const label = [...c.labels.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || `${lat.toFixed(3)}, ${lng.toFixed(3)}`;
+      return { lat, lng, label, requests: c.count, avgFare: Math.round(c.value / c.count), km: +roadKm(center, { lat, lng }).toFixed(1) };
+    });
+    const peak = hours.indexOf(Math.max(...hours));
+    return { total: jobs.length, hotspots: spots, hours, peakHour: jobs.length ? peak : null };
   }
 
   // ------------------------------------------------------------ live location from the provider app

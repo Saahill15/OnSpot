@@ -16,6 +16,8 @@ export interface JobView {
   payment: null | { method: string; amount: number; status: string; ref: string };
   ratings: Record<string, { stars: number; comment: string }>;
   cancelReason: string | null; cancelFee: number; createdAt: string; startedAt: string | null; completedAt: string | null;
+  tip: number; topRatedOnly: boolean; late: boolean; promisedBy: string | null;
+  dispute?: null | { id: string; reason: string; details: string; status: "OPEN" | "RESOLVED"; resolution: string | null; refundAmount: number };
 }
 export const ACTIVE = ['SEARCHING', 'ASSIGNED', 'ARRIVED', 'IN_PROGRESS'];
 

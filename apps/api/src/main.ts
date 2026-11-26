@@ -5,8 +5,8 @@ import { JwtModule, JwtService } from '@nestjs/jwt';
 import { OnGatewayConnection, OnGatewayInit, WebSocketGateway } from '@nestjs/websockets';
 import type { Server, Socket } from 'socket.io';
 import { AuthController, AuthGuard, AuthUser } from './auth';
-import { AdminController, JobsController, MeController, PaymentsController, ProviderController, PublicController } from './controllers';
-import { config, GeoService, PrismaService, PushService, RealtimeService, SmsService } from './infra';
+import { AdminController, JobsController, MeController, PaymentsController, PlacesController, ProviderController, PublicController } from './controllers';
+import { config, GeoService, PlacesService, PrismaService, PushService, RealtimeService, SmsService } from './infra';
 import { JobsService } from './jobs.service';
 
 /** Socket.IO: clients connect with { auth: { token } } and are joined to their own room (and `admins`). */
@@ -26,8 +26,8 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection {
 
 @Module({
   imports: [JwtModule.register({ global: true, secret: config.jwtSecret })],
-  controllers: [AuthController, PublicController, MeController, JobsController, PaymentsController, ProviderController, AdminController],
-  providers: [PrismaService, GeoService, SmsService, PushService, RealtimeService, JobsService, AuthGuard, RealtimeGateway],
+  controllers: [AuthController, PublicController, MeController, JobsController, PaymentsController, ProviderController, PlacesController, AdminController],
+  providers: [PrismaService, GeoService, SmsService, PushService, PlacesService, RealtimeService, JobsService, AuthGuard, RealtimeGateway],
 })
 export class AppModule {}
 

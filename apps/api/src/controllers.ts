@@ -5,7 +5,7 @@ import { ArrayMaxSize, IsArray, IsBoolean, IsIn, IsInt, IsLatitude, IsLongitude,
 import { Prisma } from '@prisma/client';
 import { ACTIVE_STATUSES, EVENTS, isServiceCode, PRICING, SERVICES, ServiceCode } from '@onspot/shared';
 import { AuthGuard, AuthUser, CurrentUser, Roles } from './auth';
-import { GeoService, PrismaService, PushService, RealtimeService } from './infra';
+import { GeoService, PlacesService, PrismaService, PushService, RealtimeService } from './infra';
 import { JobsService, jobView } from './jobs.service';
 
 // ---------------------------------------------------------------- DTOs
@@ -19,7 +19,14 @@ class QuoteDto {
 class CreateJobDto extends QuoteDto {
   @IsOptional() @IsString() @Length(0, 300) notes?: string;
   @IsOptional() @IsString() @Length(0, 60) vehicle?: string;
+  @IsOptional() @IsBoolean() topRatedOnly?: boolean;
 }
+class TipDto { @IsInt() @Min(10) @Max(2000) amount!: number; }
+class DisputeDto {
+  @IsIn(['OVERCHARGED', 'NO_SHOW', 'BAD_SERVICE', 'DAMAGE', 'SAFETY', 'OTHER']) reason!: string;
+  @IsOptional() @IsString() @Length(0, 500) details?: string;
+}
+class ResolveDisputeDto { @IsString() @Length(3, 500) resolution!: string; @IsInt() @Min(0) refundAmount!: number; }
 class CodeDto { @Matches(/^\d{4}$/, { message: 'Enter the 4-digit code' }) code!: string; }
 class AddonDto { @IsString() @Length(1, 60) label!: string; @IsInt() @Min(1) @Max(50000) amount!: number; @IsOptional() @IsString() @Length(0, 120) reason?: string; }
 class DecisionDto { @IsBoolean() approve!: boolean; }
@@ -115,6 +122,10 @@ export class JobsController {
   @Post(':id/pay') @HttpCode(200) @Roles('CUSTOMER') pay(@CurrentUser() u: AuthUser, @Param('id') id: string, @Body() b: PayDto) { return this.jobs.pay(u, id, b.method); }
   @Post(':id/rate') @HttpCode(200) rate(@CurrentUser() u: AuthUser, @Param('id') id: string, @Body() b: RateDto) { return this.jobs.rate(u, id, b.stars, b.comment); }
   @Post(':id/messages') @HttpCode(200) message(@CurrentUser() u: AuthUser, @Param('id') id: string, @Body() b: MessageDto) { return this.jobs.message(u, id, b.text); }
+  @Post(':id/cash-received') @HttpCode(200) @Roles('PROVIDER') cash(@CurrentUser() u: AuthUser, @Param('id') id: string) { return this.jobs.cashReceived(u, id); }
+  @Post(':id/tip') @HttpCode(200) @Roles('CUSTOMER') tip(@CurrentUser() u: AuthUser, @Param('id') id: string, @Body() b: TipDto) { return this.jobs.tip(u, id, b.amount); }
+  @Post(':id/dispute') @HttpCode(200) @Roles('CUSTOMER') dispute(@CurrentUser() u: AuthUser, @Param('id') id: string, @Body() b: DisputeDto) { return this.jobs.dispute(u, id, b.reason, b.details); }
+  @Post(':id/switch') @HttpCode(200) @Roles('CUSTOMER') switchPro(@CurrentUser() u: AuthUser, @Param('id') id: string) { return this.jobs.switchPro(u, id); }
   @Post(':id/sos') @HttpCode(200) @Roles('CUSTOMER') sos(@CurrentUser() u: AuthUser, @Param('id') id: string) { return this.jobs.sos(u, id); }
   @Post(':id/cancel') @HttpCode(200) cancel(@CurrentUser() u: AuthUser, @Param('id') id: string, @Body() b: CancelDto) { return this.jobs.cancel(u, id, b.reason); }
 }
@@ -167,6 +178,14 @@ export class ProviderController {
     return this.view(upd);
   }
   @Post('location') @HttpCode(200) location(@CurrentUser() u: AuthUser, @Body() b: LocationDto) { return this.jobs.providerLocation(u.sub, b); }
+  @Get('hotspots') hotspots(@CurrentUser() u: AuthUser) { return this.jobs.hotspots(u.sub); }
+}
+
+@Controller('places') @UseGuards(AuthGuard)
+export class PlacesController {
+  constructor(private places: PlacesService) {}
+  /** Real nearby garages for "tow to" (OpenStreetMap). Empty list → the app offers "choose on map". */
+  @Get('garages') garages(@Query() q: LocationQuery) { return this.places.garages(q.lat, q.lng); }
 }
 
 // ---------------------------------------------------------------- ops / admin
@@ -187,6 +206,19 @@ export class AdminController {
   }
   @Get('jobs/:id') async job(@Param('id') id: string) { return jobView(await this.jobSvc.load(id), 'admin'); }
 
+  @Get('disputes') async disputes() {
+    const list = await this.db.dispute.findMany({
+      orderBy: [{ status: 'asc' }, { createdAt: 'desc' }], take: 100,
+      include: { job: { select: { id: true, service: true, finalAmount: true, total: true, cancelFee: true, status: true, customer: { select: { name: true, phone: true } }, provider: { select: { userId: true, user: { select: { name: true } } } } } } },
+    });
+    return list.map(d => ({
+      id: d.id, reason: d.reason, details: d.details, status: d.status, resolution: d.resolution, refundAmount: d.refundAmount, createdAt: d.createdAt, resolvedAt: d.resolvedAt,
+      job: { id: d.job.id, service: d.job.service, status: d.job.status, amount: d.job.finalAmount ?? d.job.total, maxRefund: (d.job.finalAmount ?? 0) + d.job.cancelFee },
+      customer: d.job.customer, provider: d.job.provider ? { id: d.job.provider.userId, name: d.job.provider.user.name } : null,
+    }));
+  }
+  @Post('disputes/:id/resolve') @HttpCode(200) resolve(@Param('id') id: string, @Body() b: ResolveDisputeDto) { return this.jobSvc.resolveDispute(id, b.resolution, b.refundAmount); }
+
   @Post('providers/:id/suspend') @HttpCode(200) async suspend(@Param('id') id: string, @Body() b: SuspendDto) {
     const p = await this.db.provider.findUnique({ where: { userId: id } });
     if (!p) throw new NotFoundException('Provider not found');
@@ -199,7 +231,7 @@ export class AdminController {
   }
 
   @Get('overview') async overview() {
-    const [byStatus, paid, matched, failed, online, providers, pendingKyc] = await Promise.all([
+    const [byStatus, paid, matched, failed, online, providers, pendingKyc, openDisputes, lateNow] = await Promise.all([
       this.db.job.groupBy({ by: ['status'], _count: true }),
       this.db.job.findMany({ where: { status: 'PAID' }, select: { finalAmount: true, platformFee: true } }),
       this.db.job.findMany({ where: { assignedAt: { not: null } }, select: { createdAt: true, assignedAt: true } }),
@@ -207,6 +239,8 @@ export class AdminController {
       this.db.provider.count({ where: { online: true } }),
       this.db.provider.count(),
       this.db.provider.count({ where: { kycStatus: 'SUBMITTED' } }),
+      this.db.dispute.count({ where: { status: 'OPEN' } }),
+      this.db.job.count({ where: { status: 'ASSIGNED', lateAt: { not: null } } }),
     ]);
     const count = (s: string) => byStatus.find(x => x.status === s)?._count ?? 0;
     const gmv = paid.reduce((t, j) => t + (j.finalAmount ?? 0), 0);
@@ -215,7 +249,7 @@ export class AdminController {
     return {
       active: ACTIVE_STATUSES.reduce((t, s) => t + count(s), 0), completed: count('COMPLETED') + count('PAID'), noProvider: failed,
       matchRate: matched.length + failed ? Math.round((matched.length / (matched.length + failed)) * 100) : 0,
-      avgMatchSec, gmv, revenue, online, providers, pendingKyc, geoIndex: this.geo.index.kind,
+      avgMatchSec, gmv, revenue, online, providers, pendingKyc, openDisputes, lateNow, geoIndex: this.geo.index.kind,
     };
   }
   @Get('providers') async providers() {
