@@ -2,7 +2,7 @@
 
 Two layers in this doc:
 1. **Production target** — what to build for real launch.
-2. **Prototype (this repo, `app/`)** — a zero-dependency working simulation of the same flow, so you can demo/validate today.
+2. **Prototype (`prototype/`)** — a zero-dependency working simulation of the same flow, so you can demo/validate today.
 
 ---
 
@@ -143,12 +143,12 @@ Modular monolith → extract **dispatch + realtime** first (the hot path) → pe
 
 ---
 
-## 2. Prototype architecture (`app/`)
+## 2. Prototype architecture (`prototype/`)
 
 Goal: prove the full flow end-to-end with **zero installs** (just Node ≥18).
 
 ```
-app/
+prototype/
 ├── server.js          # HTTP server: REST API + Server-Sent Events + static files
 │                      # in-memory store persisted to data.json
 │                      # dispatch engine, pricing, simulated "bot" providers

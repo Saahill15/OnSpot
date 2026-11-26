@@ -10,23 +10,19 @@
 | **3. Home emergency** | 6 wks | Plumber, electrician, locksmith; scheduled bookings; photo-based quotes. | Home services ≥ 20% of jobs |
 | **4. Revenue levers** | ongoing | Shield subscription, insurer/OEM RSA API, fleet accounts, dynamic (capped) pricing, AI triage, demand heat-maps for providers. | Contribution-margin positive per job |
 
-## Phase 1 repo structure (monorepo, Turborepo + pnpm)
+## Phase 1 repo structure (npm workspaces monorepo, as built)
 
 ```
-onspot/
+OnSpot/
 ├── apps/
-│   ├── customer/        # Expo (React Native)
-│   ├── provider/        # Expo (React Native)
-│   ├── admin/           # Next.js
-│   └── api/             # NestJS
-│       └── src/modules/ auth, users, providers, services, pricing,
-│                        dispatch, jobs, realtime, payments, ratings, notifications, admin
+│   ├── api/             # NestJS + Prisma + Redis GEO + Socket.IO
+│   ├── mobile/          # Expo: one app, customer or partner mode chosen at sign-in
+│   └── admin/           # Ops console (Vite + React)
 ├── packages/
-│   ├── ui/              # shared RN components + design tokens
-│   ├── types/           # shared TS types (Job, Quote, Addon…) — generated from OpenAPI
-│   └── config/          # eslint, tsconfig
-├── infra/               # docker-compose (postgres+postgis, redis), terraform later
-└── docs/                # PRD, architecture, ADRs
+│   └── shared/          # catalog, pricing engine, realtime contract
+├── infra/               # docker-compose (redis, optional postgis)
+├── docs/                # PRD, architecture, roadmap
+└── prototype/           # original clickable prototype
 ```
 
 ## Phase 1 sprint plan (2-week sprints)
@@ -39,7 +35,7 @@ onspot/
 6. **Hardening:** background location, poor-network testing, load test dispatch, Play Store beta to 50 providers.
 
 ## Immediate next steps (this week)
-1. Run the prototype (`cd app && node server.js`) and demo it to 5 drivers + 5 providers.
+1. Run the prototype (`cd prototype && node server.js`) and demo it to 5 drivers + 5 providers.
 2. Fix the name + domain + Play Store listing name.
 3. Map 100 providers on your launch corridor (spreadsheet: name, phone, service, location, hours, has smartphone?).
 4. Decide launch commission (recommend 0% for 3 months).
