@@ -1,0 +1,202 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CUSTOMER
+  PROVIDER
+  ADMIN
+}
+
+enum KycStatus {
+  PENDING
+  SUBMITTED
+  VERIFIED
+  REJECTED
+}
+
+enum JobStatus {
+  SEARCHING
+  ASSIGNED
+  ARRIVED
+  IN_PROGRESS
+  COMPLETED
+  PAID
+  CANCELLED
+  NO_PROVIDER
+}
+
+enum AddonStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model User {
+  id          String    @id @default(cuid())
+  phone       String
+  role        Role
+  name        String
+  contacts    Json      @default("[]") // [{ name, phone }] emergency contacts
+  vehicle     Json? // { model, plate, fuel }
+  shieldUntil DateTime?
+  createdAt   DateTime  @default(now())
+  provider    Provider?
+  jobs        Job[]     @relation("CustomerJobs")
+  pushTokens  PushToken[]
+
+  @@unique([phone, role])
+}
+
+/// Expo push tokens (one per device). Expo relays to FCM (Android) and APNs (iOS).
+model PushToken {
+  token     String   @id
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  platform  String   @default("unknown")
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model OtpCode {
+  id        String    @id @default(cuid())
+  phone     String
+  codeHash  String
+  expiresAt DateTime
+  attempts  Int       @default(0)
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([phone, createdAt])
+}
+
+model Provider {
+  userId      String    @id
+  user        User      @relation(fields: [userId], references: [id])
+  services    String[]
+  vehicleNo   String    @default("")
+  online      Boolean   @default(false)
+  lat         Float?
+  lng         Float?
+  rating      Float     @default(5)
+  ratingCount Int       @default(0)
+  kycStatus   KycStatus @default(PENDING)
+  kycDocs     Json?
+  suspended   Boolean   @default(false) // set by ops; blocks going online
+  earnings    Int       @default(0)
+  jobsDone    Int       @default(0)
+  // One active job per provider, enforced by the database.
+  activeJobId String?   @unique
+  jobs        Job[]     @relation("ProviderJobs")
+  updatedAt   DateTime  @updatedAt
+}
+
+model Job {
+  id              String     @id @default(cuid())
+  customerId      String
+  customer        User       @relation("CustomerJobs", fields: [customerId], references: [id])
+  providerId      String?
+  provider        Provider?  @relation("ProviderJobs", fields: [providerId], references: [userId])
+  service         String
+  status          JobStatus  @default(SEARCHING)
+  pickupLat       Float
+  pickupLng       Float
+  pickupLabel     String     @default("")
+  dropLat         Float?
+  dropLng         Float?
+  notes           String     @default("")
+  vehicle         String     @default("")
+  quote           Json // immutable locked quote (Fair Price Lock)
+  total           Int
+  platformFee     Int
+  startCode       String // shown to customer only
+  otpTries        Int        @default(0)
+  radiusKm        Int        @default(0)
+  offeredIds      String[]   @default([])
+  declinedIds     String[]   @default([])
+  eta             Int?
+  finalAmount     Int?
+  providerPayout  Int?
+  cancelReason    String?
+  cancelFee       Int        @default(0)
+  createdAt       DateTime   @default(now())
+  searchStartedAt DateTime   @default(now())
+  assignedAt      DateTime?
+  arrivedAt       DateTime?
+  startedAt       DateTime?
+  completedAt     DateTime?
+  paidAt          DateTime?
+  events          JobEvent[]
+  addons          Addon[]
+  messages        Message[]
+  payment         Payment?
+  ratings         Rating[]
+
+  @@index([status])
+  @@index([customerId])
+  @@index([providerId])
+}
+
+model JobEvent {
+  id    String   @id @default(cuid())
+  jobId String
+  job   Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  text  String
+  at    DateTime @default(now())
+
+  @@index([jobId])
+}
+
+model Addon {
+  id        String      @id @default(cuid())
+  jobId     String
+  job       Job         @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  label     String
+  amount    Int
+  reason    String      @default("")
+  status    AddonStatus @default(PENDING)
+  createdAt DateTime    @default(now())
+
+  @@index([jobId])
+}
+
+model Message {
+  id    String   @id @default(cuid())
+  jobId String
+  job   Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  from  Role
+  text  String
+  at    DateTime @default(now())
+
+  @@index([jobId])
+}
+
+model Payment {
+  id             String   @id @default(cuid())
+  jobId          String   @unique
+  job            Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  method         String
+  amount         Int
+  status         String // CREATED | CAPTURED
+  ref            String
+  gatewayOrderId String?
+  createdAt      DateTime @default(now())
+}
+
+model Rating {
+  id        String   @id @default(cuid())
+  jobId     String
+  job       Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  by        Role
+  stars     Int
+  comment   String   @default("")
+  createdAt DateTime @default(now())
+
+  @@unique([jobId, by])
+}

@@ -1,0 +1,42 @@
+{
+  "expo": {
+    "name": "OnSpot",
+    "slug": "onspot",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "app.onspot.mobile"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#FF385C",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "package": "app.onspot.mobile"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "scheme": "onspot",
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "OnSpot uses your location to send help to the right spot and, for partners, to show customers where you are."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#FF385C"
+        }
+      ]
+    ]
+  }
+}

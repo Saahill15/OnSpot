@@ -1,0 +1,19 @@
+# Local infrastructure. Postgres can also run natively (see README: npm run db:start).
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: onspot-redis
+    ports: ["6379:6379"]
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: [redis-data:/data]
+    restart: unless-stopped
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: onspot-postgres
+    profiles: ["postgres"]   # opt-in: docker compose --profile postgres up -d
+    environment: { POSTGRES_USER: onspot, POSTGRES_PASSWORD: onspot, POSTGRES_DB: onspot }
+    ports: ["54329:5432"]
+    volumes: [pg-data:/var/lib/postgresql/data]
+volumes:
+  redis-data:
+  pg-data:

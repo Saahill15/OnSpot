@@ -1,0 +1,16 @@
+# dependencies & builds
+node_modules/
+dist/
+.expo/
+web-build/
+
+# local data & secrets (never commit)
+.env
+.env.local
+.pgdata/
+app/data.json
+
+# logs & OS
+*.log
+.DS_Store
+Thumbs.db
