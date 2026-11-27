@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { Logger, Module, ValidationPipe } from '@nestjs/common';
+import { Logger, Module, RequestMethod, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { JwtModule, JwtService } from '@nestjs/jwt';
 import { OnGatewayConnection, OnGatewayInit, WebSocketGateway } from '@nestjs/websockets';
@@ -8,6 +8,7 @@ import { AuthController, AuthGuard, AuthUser } from './auth';
 import { AdminController, JobsController, MeController, PaymentsController, PlacesController, ProviderController, PublicController } from './controllers';
 import { config, GeoService, PlacesService, PrismaService, PushService, RealtimeService, SmsService } from './infra';
 import { JobsService } from './jobs.service';
+import { TrackPageController } from './track-page';
 
 /** Socket.IO: clients connect with { auth: { token } } and are joined to their own room (and `admins`). */
 @WebSocketGateway({ cors: { origin: true } })
@@ -26,7 +27,7 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection {
 
 @Module({
   imports: [JwtModule.register({ global: true, secret: config.jwtSecret })],
-  controllers: [AuthController, PublicController, MeController, JobsController, PaymentsController, ProviderController, PlacesController, AdminController],
+  controllers: [AuthController, PublicController, MeController, JobsController, PaymentsController, ProviderController, PlacesController, AdminController, TrackPageController],
   providers: [PrismaService, GeoService, SmsService, PushService, PlacesService, RealtimeService, JobsService, AuthGuard, RealtimeGateway],
 })
 export class AppModule {}
@@ -34,7 +35,7 @@ export class AppModule {}
 export async function createApp() {
   const app = await NestFactory.create(AppModule, { logger: process.env.NODE_ENV === 'test' ? ['error'] : undefined });
   app.enableCors({ origin: true });
-  app.setGlobalPrefix('v1');
+  app.setGlobalPrefix('v1', { exclude: [{ path: 't/:id', method: RequestMethod.GET }] }); // short public share link
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true, forbidUnknownValues: false }));
   app.enableShutdownHooks();
   return app;

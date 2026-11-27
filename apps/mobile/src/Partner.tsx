@@ -5,6 +5,7 @@ import * as Location from 'expo-location';
 import { EVENTS, JobOffer, LatLng, SERVICES, ServiceCode, SERVICE_BY_CODE } from '@onspot/shared';
 import { api, getSocket } from './api';
 import { act, ACTIVE, ChatPanel, confirm, JobView, Stars, toast } from './common';
+import { hasBackgroundPermission, startBackgroundLocation, stopBackgroundLocation } from './backgroundLocation';
 import Map from './Map';
 import type { MapMarker } from './mapTypes';
 import { Avatar, BottomCTA, Button, C, Card, Divider, hhmm, Icon, IconCircle, Input, Pill, Row, rupee, SERVICE_ICON, T } from './ui';
@@ -64,9 +65,27 @@ export default function Partner({ onSignOut }: { onSignOut: () => void }) {
     if (expired.length) { expired.forEach(o => api(`/jobs/${o.jobId}/decline`, { body: {} }).catch(() => {})); setOffers(l => l.filter(o => !expired.includes(o))); }
   }, [now]);
 
-  // live GPS while online (every ~5 s); the API turns it into ETA for the customer
+  // Live GPS while online; the API turns it into the customer's ETA.
+  // Phones: a background task keeps sharing when the app is closed or the screen is off (high accuracy only during a job).
+  // Web, or if the partner declines background access: foreground-only updates while the app is open.
+  const [bgActive, setBgActive] = useState(false);
+  const onJob = !!job && ACTIVE.includes(job.status);
   useEffect(() => {
-    if (!me?.online) return;
+    if (!me?.online) { stopBackgroundLocation(); setBgActive(false); return; }
+    let cancelled = false;
+    (async () => {
+      if (Platform.OS === 'web') return;
+      // Google Play policy: explain background location in-app before the system prompt.
+      if (!(await hasBackgroundPermission()) && !(await confirm('Share location in the background?',
+        "While you're online, OnSpot uses your location even when the app is closed or the screen is off, so you get nearby jobs and customers see your live ETA. It stops as soon as you go offline.", 'Continue'))) return;
+      const r = await startBackgroundLocation(onJob ? 'job' : 'idle').catch(() => 'unsupported' as const);
+      if (!cancelled) setBgActive(r === 'started');
+      if (r === 'denied-background') toast('Background location is off: you only get jobs while the app is open.', 'err');
+    })();
+    return () => { cancelled = true; };
+  }, [me?.online, onJob]);
+  useEffect(() => {
+    if (!me?.online || bgActive) return; // the background task already reports location
     let sub: Location.LocationSubscription | undefined;
     (async () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
@@ -78,7 +97,7 @@ export default function Partner({ onSignOut }: { onSignOut: () => void }) {
       });
     })();
     return () => sub?.remove();
-  }, [me?.online]);
+  }, [me?.online, bgActive]);
 
   // dev helper: drive toward the customer so the full flow can be demoed from a desk
   const simRef = useRef<any>(null);
@@ -108,7 +127,7 @@ export default function Partner({ onSignOut }: { onSignOut: () => void }) {
     const at = me.online ? null : (await getPosition()) || (Platform.OS === 'web' ? DEMO : null);
     if (!me.online && !at) return toast('Allow location access to go online', 'err');
     const r = await act(() => api<Me>('/provider/status', { body: { online: !me.online, ...(at || {}) } }));
-    if (r) { setMe(r); if (at) pos.current = at; toast(r.online ? "You're online. Keep the app open to get jobs." : "You're offline", r.online ? 'ok' : 'info'); }
+    if (r) { setMe(r); if (at) pos.current = at; toast(r.online ? (Platform.OS === 'web' ? "You're online. Keep this page open to get jobs." : "You're online. You'll get jobs even with the app closed.") : "You're offline", r.online ? 'ok' : 'info'); }
   };
 
   const active = job && ACTIVE.includes(job.status) ? job : null;

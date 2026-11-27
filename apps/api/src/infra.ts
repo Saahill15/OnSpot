@@ -18,6 +18,7 @@ export const config = {
   googlePlacesKey: process.env.GOOGLE_PLACES_API_KEY || '', // Google Places API (New); empty = OpenStreetMap only
   expoAccessToken: process.env.EXPO_ACCESS_TOKEN || '', // only if "enhanced push security" is on in Expo
   dispatchTickMs: +(process.env.DISPATCH_TICK_MS || 1000),
+  publicUrl: (process.env.PUBLIC_WEB_URL || `http://localhost:${process.env.PORT || 4100}`).replace(/\/$/, ''), // base for share links (/t/:id)
   offerTtlSec: 20,
   lateGraceMin: +(process.env.LATE_GRACE_MIN ?? 10), // minutes past the promised arrival before the customer can switch for free
   topRatedMin: 4.5,

@@ -7,6 +7,7 @@ import { ToastHost } from './src/common';
 import Customer from './src/Customer';
 import Partner from './src/Partner';
 import { onNotificationTap, registerForPush, unregisterPush } from './src/push';
+import { stopBackgroundLocation } from './src/backgroundLocation';
 import { Button, C, T } from './src/ui';
 
 export default function App() {
@@ -21,7 +22,8 @@ export default function App() {
     return onNotificationTap(() => setRefreshKey(k => k + 1));
   }, [session?.token]);
 
-  const signOut = async () => { await unregisterPush(); closeSocket(); await saveSession(null); setSession(null); };
+  // Stop background location before clearing the session, so a signed-out phone never keeps reporting.
+  const signOut = async () => { await stopBackgroundLocation(); await unregisterPush(); closeSocket(); await saveSession(null); setSession(null); };
 
   let screen: React.ReactNode;
   if (session === undefined) screen = <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}><ActivityIndicator color={C.accent} /></View>;

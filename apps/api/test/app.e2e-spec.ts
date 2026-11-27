@@ -421,3 +421,19 @@ describe('nearby garages (Google Places)', () => {
     }
   });
 });
+
+describe('family tracking page', () => {
+  it('serves the share page at /t/:id, keeps it safe, and expires links 2 h after the trip', async () => {
+    const page = await http().get('/t/abc123').expect(200);
+    expect(page.headers['content-type']).toMatch(/text\/html/);
+    expect(page.headers['x-robots-tag']).toBe('noindex');
+    expect(page.text).toContain('/v1/track/');
+    const evil = await http().get('/t/' + encodeURIComponent('x"</script><script>alert(1)</script>')).expect(200);
+    expect(evil.text).not.toContain('<script>alert(1)');
+    // An old finished job: link expired.
+    const done = await db.job.findFirst({ where: { status: 'PAID' } });
+    await db.job.update({ where: { id: done!.id }, data: { paidAt: new Date(Date.now() - 3 * 3600_000) } });
+    await http().get(`/v1/track/${done!.id}`).expect(410);
+    await http().get('/v1/track/does-not-exist').expect(404);
+  });
+});

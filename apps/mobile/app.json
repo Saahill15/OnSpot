@@ -7,8 +7,11 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true,
-      "bundleIdentifier": "app.onspot.mobile"
+      "supportsTablet": false,
+      "bundleIdentifier": "app.onspot.mobile",
+      "infoPlist": {
+        "UIBackgroundModes": ["location", "remote-notification"]
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -18,17 +21,23 @@
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
-      "package": "app.onspot.mobile"
+      "package": "app.onspot.mobile",
+      "permissions": ["android.permission.POST_NOTIFICATIONS", "android.permission.VIBRATE"]
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "scheme": "onspot",
     "plugins": [
+      "expo-dev-client",
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "OnSpot uses your location to send help to the right spot and, for partners, to show customers where you are."
+          "locationWhenInUsePermission": "OnSpot uses your location to send help to the right spot and, for partners, to show customers where you are.",
+          "locationAlwaysAndWhenInUsePermission": "While you're online as an OnSpot partner, your location is shared in the background so you get nearby jobs and customers see your live ETA. It stops when you go offline.",
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true,
+          "isIosBackgroundLocationEnabled": true
         }
       ],
       [

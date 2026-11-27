@@ -1,5 +1,5 @@
 // HTTP API. Thin controllers: validation + auth here, rules live in JobsService.
-import { BadRequestException, Body, Controller, ForbiddenException, Get, HttpCode, NotFoundException, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, ForbiddenException, Get, GoneException, HttpCode, NotFoundException, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { Type } from 'class-transformer';
 import { ArrayMaxSize, IsArray, IsBoolean, IsIn, IsInt, IsLatitude, IsLongitude, IsNumber, IsOptional, IsString, Length, Matches, Max, Min, ValidateNested } from 'class-validator';
 import { Prisma } from '@prisma/client';
@@ -66,7 +66,15 @@ export class PublicController {
   @Get('health') health() { return { ok: true, geo: this.geo.index.kind }; }
   @Get('catalog') catalog() { return { services: SERVICES, pricing: PRICING }; }
   /** Family tracking link: no codes, phones, chat or notes. */
-  @Get('track/:id') async track(@Param('id') id: string) { return jobView(await this.jobs.load(id), 'public'); }
+  @Get('track/:id') async track(@Param('id') id: string) {
+    const j = await this.jobs.load(id);
+    // Privacy: family links stop working 2 hours after the trip ends.
+    if (!ACTIVE_STATUSES.includes(j.status as any)) {
+      const endedAt = j.paidAt ?? j.completedAt ?? j.events.at(-1)?.at ?? j.createdAt;
+      if (Date.now() - endedAt.getTime() > 2 * 3600_000) throw new GoneException('This tracking link has expired');
+    }
+    return jobView(j, 'public');
+  }
 }
 
 // ---------------------------------------------------------------- me (any signed-in user)

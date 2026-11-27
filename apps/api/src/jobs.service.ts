@@ -455,7 +455,7 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
   async sos(u: AuthUser, id: string) {
     const j = await this.mustBeCustomer(u, id);
     const contacts = (j.customer.contacts as { name: string; phone: string }[]) || [];
-    const link = `${process.env.PUBLIC_WEB_URL || 'https://onspot.app'}/track/${id}`;
+    const link = `${config.publicUrl}/t/${id}`;
     for (const c of contacts) await this.sms.send(c.phone, `SOS from ${j.customer.name} via OnSpot. Live location: ${link}`);
     await this.event(id, `SOS raised · ops alerted${contacts.length ? ` · ${contacts.length} emergency contact(s) notified` : ''}`);
     this.rt.toAdmins(EVENTS.SOS, { jobId: id, customer: j.customer.name, phone: j.customer.phone, pickup: { lat: j.pickupLat, lng: j.pickupLng } });

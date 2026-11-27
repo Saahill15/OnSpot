@@ -15,7 +15,7 @@ OnSpot/
 └── prototype/       Original zero-dependency clickable prototype (kept for demos)
 ```
 
-Docs: [PRD](docs/PRD.md) · [Architecture](docs/ARCHITECTURE.md) · [Roadmap](docs/ROADMAP.md) · [Status / what's left](docs/STATUS.md) · [Prototype](prototype/README.md)
+Docs: [PRD](docs/PRD.md) · [Architecture](docs/ARCHITECTURE.md) · [Roadmap](docs/ROADMAP.md) · [Status / what's left](docs/STATUS.md) · [Feature ideas](docs/IDEAS.md) · [Android build](docs/ANDROID.md) · [Prototype](prototype/README.md)
 
 ## Run it locally
 
@@ -80,7 +80,9 @@ The API sends pushes through Expo's push service, which relays to FCM (Android) 
 
 To receive pushes on a phone (once): `npx eas-cli@latest init` in `apps/mobile` (adds the EAS projectId), upload FCM credentials for Android with `npx eas-cli@latest credentials`, then make a development build. Push doesn't work in Expo Go on Android or on web. `PUSH_DRIVER=log` prints instead of sending.
 
-Phone testing: set `EXPO_PUBLIC_API_URL=http://<your-PC-LAN-IP>:4100/v1` (Android emulator: `http://10.0.2.2:4100/v1`) and build a dev client with `npx expo run:android` or `npx eas-cli@latest build --profile development`.
+Phone testing: follow **[docs/ANDROID.md](docs/ANDROID.md)** (EAS cloud build, no Android SDK needed; Maps and Firebase keys; what to test).
+
+Family tracking: "Share trip" sends `<PUBLIC_WEB_URL>/t/<jobId>`, a public live page served by the API (no phones, codes or chat; expires 2 h after the trip).
 
 Sign-in uses phone OTP. In development (`OTP_DEV_ECHO=true`) the code is returned by the API and shown in the app instead of being sent by SMS.
 

@@ -3,7 +3,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Animated, Easing, Linking, Platform, Pressable, ScrollView, Share, TextInput, View, useWindowDimensions } from 'react-native';
 import * as Location from 'expo-location';
 import { CANCEL_REASONS, EVENTS, LatLng, Quote, SERVICES, ServiceCode, SERVICE_BY_CODE } from '@onspot/shared';
-import { api, getSession, getSocket } from './api';
+import { api, getSession, getSocket, PUBLIC_URL } from './api';
 import { act, ACTIVE, ChatPanel, confirm, JobView, Stars, Steps, Timeline, toast } from './common';
 import Map from './Map';
 import type { MapMarker } from './mapTypes';
@@ -338,7 +338,7 @@ function LiveTrip({ job, setJob, me }: { job: JobView; setJob: (j: JobView) => v
   const title = ({ ASSIGNED: 'Your pro is on the way', ARRIVED: 'Your pro has arrived', IN_PROGRESS: 'Work in progress' } as Record<string, string>)[job.status];
   const big = job.status === 'ASSIGNED' ? `${job.eta ?? '—'} min` : job.status === 'ARRIVED' ? 'Share your code' : `Since ${hhmm(job.startedAt!)}`;
   const share = async () => {
-    const url = `${process.env.EXPO_PUBLIC_WEB_URL || 'https://onspot.app'}/track/${job.id}`;
+    const url = `${PUBLIC_URL}/t/${job.id}`;
     await Share.share({ message: `I'm getting ${SERVICE_BY_CODE[job.service].name} help via OnSpot from ${p.name} (${p.vehicleNo || 'verified provider'}). Track live: ${url}` }).catch(() => {});
   };
   const sos = async () => {
