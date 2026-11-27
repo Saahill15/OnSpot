@@ -55,11 +55,6 @@ export default function Customer({ onSignOut }: { onSignOut: () => void }) {
     const s = getSocket(); if (!s) return;
     const onJob = (j: JobView) => setJob(prev => {
       if (prev && prev.id !== j.id) return prev;
-      if (prev && prev.status !== j.status) {
-        const m: Record<string, string> = { ASSIGNED: `${j.provider?.name} accepted · about ${j.eta} min away`, ARRIVED: `${j.provider?.name} has arrived. Share your start code.`, COMPLETED: 'Job done. Please review the bill.', NO_PROVIDER: 'No provider available right now' };
-        if (m[j.status]) toast(m[j.status], j.status === 'NO_PROVIDER' ? 'err' : 'ok');
-      }
-      if (prev && !prev.late && j.late) toast(`${j.provider?.name} is running late. You can switch for free.`, 'err');
       const last = j.messages?.[j.messages.length - 1];
       if (prev && last && (prev.messages?.length || 0) < (j.messages?.length || 0) && last.from === 'PROVIDER') toast(`${j.provider?.name}: ${last.text}`);
       return j;

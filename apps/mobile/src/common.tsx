@@ -62,14 +62,19 @@ export function ToastHost() {
     pushToast = t => {
       setMsg(t); clearTimeout(timer.current);
       Animated.timing(op, { toValue: 1, duration: 160, useNativeDriver: Platform.OS !== 'web' }).start();
-      timer.current = setTimeout(() => Animated.timing(op, { toValue: 0, duration: 200, useNativeDriver: Platform.OS !== 'web' }).start(() => setMsg(null)), 3500);
+      timer.current = setTimeout(() => Animated.timing(op, { toValue: 0, duration: 200, useNativeDriver: Platform.OS !== 'web' }).start(() => setMsg(null)), 2800);
     };
   }, []);
   if (!msg) return null;
+  // Light card with a small coloured icon (not a heavy black bar), floating just under the status bar.
+  const tone = { ok: { icon: 'check' as const, fg: C.ok, bg: C.okSoft }, err: { icon: 'alert-circle' as const, fg: C.danger, bg: C.dangerSoft }, info: { icon: 'bell' as const, fg: C.ink, bg: C.surface2 } }[msg.tone];
   return (
-    <Animated.View pointerEvents="none" style={{ position: 'absolute', top: 54, left: 16, right: 16, opacity: op, zIndex: 100 }}>
-      <View style={{ backgroundColor: msg.tone === 'err' ? C.danger : C.ink, borderRadius: 12, paddingVertical: 13, paddingHorizontal: 16, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 12, elevation: 6 }}>
-        <T s="sm" style={{ color: '#fff', fontWeight: '500' }}>{msg.text}</T>
+    <Animated.View pointerEvents="none" style={{ position: 'absolute', top: 48, left: 16, right: 16, alignItems: 'center', opacity: op, zIndex: 100,
+      transform: [{ translateY: op.interpolate({ inputRange: [0, 1], outputRange: [-12, 0] }) }] }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, maxWidth: 420, backgroundColor: '#fff', borderRadius: 14, paddingVertical: 10, paddingLeft: 10, paddingRight: 16,
+        borderWidth: 1, borderColor: C.line, shadowColor: '#000', shadowOpacity: 0.1, shadowRadius: 16, shadowOffset: { width: 0, height: 6 }, elevation: 4 }}>
+        <View style={{ width: 28, height: 28, borderRadius: 14, backgroundColor: tone.bg, alignItems: 'center', justifyContent: 'center' }}><Icon name={tone.icon} size={15} color={tone.fg} /></View>
+        <T s="sm" style={{ color: C.ink, fontWeight: '500', flexShrink: 1 }}>{msg.text}</T>
       </View>
     </Animated.View>
   );

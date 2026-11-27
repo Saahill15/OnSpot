@@ -40,11 +40,7 @@ export default function Partner({ onSignOut }: { onSignOut: () => void }) {
     const onRevoke = ({ jobId }: { jobId: string }) => setOffers(l => l.filter(x => x.jobId !== jobId));
     const onJob = (j: JobView) => setJob(prev => {
       if (prev && prev.id !== j.id && ACTIVE.includes(prev.status)) return prev;
-      if (prev && prev.status !== j.status && j.status === 'CANCELLED') toast('The customer cancelled this job', 'err');
-      if (prev && prev.status !== j.status && j.status === 'PAID') toast(`Payment received · ${rupee(j.finalAmount)}`, 'ok');
-      if (prev && prev.payment?.status !== 'PENDING_CASH' && j.payment?.status === 'PENDING_CASH') toast(`Collect ${rupee(j.finalAmount)} in cash, then confirm`, 'ok');
       if (prev && !prev.tip && j.tip) toast(`${j.customer.name} tipped you ${rupee(j.tip)}!`, 'ok');
-      if (prev && !prev.late && j.late) toast("You're running late. The customer can now switch pros.", 'err');
       if (prev && prev.status === 'ASSIGNED' && j.status === 'SEARCHING') toast('The customer switched to another pro', 'err');
       const pa = prev?.addons.filter(a => a.status !== 'PENDING').length || 0, na = j.addons.filter(a => a.status !== 'PENDING');
       if (prev && na.length > pa) { const a = na[na.length - 1]; toast(`Customer ${a.status === 'APPROVED' ? 'approved' : 'declined'} ${a.label}`, a.status === 'APPROVED' ? 'ok' : 'err'); }
