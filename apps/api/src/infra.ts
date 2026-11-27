@@ -14,7 +14,8 @@ export const config = {
   razorpayKeyId: process.env.RAZORPAY_KEY_ID || '',
   razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET || '',
   pushDriver: (process.env.PUSH_DRIVER || 'expo') as 'expo' | 'log' | 'memory',
-  placesDriver: (process.env.PLACES_DRIVER || 'osm') as 'osm' | 'off',
+  placesDriver: (process.env.PLACES_DRIVER || 'on') as 'on' | 'off',
+  googlePlacesKey: process.env.GOOGLE_PLACES_API_KEY || '', // Google Places API (New); empty = OpenStreetMap only
   expoAccessToken: process.env.EXPO_ACCESS_TOKEN || '', // only if "enhanced push security" is on in Expo
   dispatchTickMs: +(process.env.DISPATCH_TICK_MS || 1000),
   offerTtlSec: 20,
@@ -152,52 +153,85 @@ export class PushService {
   }
 }
 
-// ---------------------------------------------------------------- nearby garages (OpenStreetMap via Overpass)
-export interface Garage { name: string; lat: number; lng: number; km: number; phone?: string }
+/// ---------------------------------------------------------------- nearby garages (Google Places → OpenStreetMap fallback)
+export interface Garage { name: string; lat: number; lng: number; km: number; phone?: string; openNow?: boolean | null; rating?: number | null; source: 'google' | 'osm' }
 
 @Injectable()
 export class PlacesService {
   private log = new Logger('Places');
   private cache = new Map<string, { at: number; data: Garage[] }>();
-  private downUntil = 0; // after a full failure, skip OSM for a while so customers aren't kept waiting
-  /** Real car-repair shops near a point. Cached 30 min per ~1 km cell. Returns [] if OSM is unreachable,
-   *  and the app falls back to "choose on map". Worst-case wait is ~12 s, and then 0 s for the next 2 minutes. */
+  private osmDownUntil = 0; // after an OSM failure, skip it for a while so customers aren't kept waiting
+
+  /** Real car-repair shops near a point, nearest first (max 6). Cached 15 min per ~1 km cell.
+   *  Google Places when GOOGLE_PLACES_API_KEY is set (best coverage in India, includes "open now");
+   *  otherwise, or if Google fails, OpenStreetMap via Overpass. Returns [] when nothing is available,
+   *  and the app falls back to "choose on map". */
   async garages(lat: number, lng: number): Promise<Garage[]> {
+    if (config.placesDriver === 'off') return [];
     const key = `${lat.toFixed(2)}:${lng.toFixed(2)}`;
     const hit = this.cache.get(key);
-    if (hit && Date.now() - hit.at < 30 * 60_000) return hit.data;
-    if (config.placesDriver === 'off' || Date.now() < this.downUntil) return [];
-    const q = `[out:json][timeout:8];(node["shop"="car_repair"](around:20000,${lat},${lng});way["shop"="car_repair"](around:20000,${lat},${lng}););out center 60;`;
-    try {
-      // The free public Overpass servers are often overloaded (502/504); try a mirror before giving up.
-      // Production: run our own Overpass instance or use a places API with an SLA.
-      let out: any = null, lastErr = '';
-      for (const url of ['https://overpass-api.de/api/interpreter', 'https://overpass.private.coffee/api/interpreter']) {
-        try {
-          const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json', 'User-Agent': 'OnSpot/0.1 (roadside assistance app)' },
-            body: 'data=' + encodeURIComponent(q), signal: AbortSignal.timeout(6_000),
-          });
-          if (!res.ok) { lastErr = `${new URL(url).host} ${res.status}`; continue; }
-          out = await res.json();
-          break;
-        } catch (e: any) { lastErr = `${new URL(url).host} ${e.message}`; }
-      }
-      if (!out) throw new Error(lastErr);
-      const data: Garage[] = (out.elements || [])
-        .map((e: any) => ({ lat: e.lat ?? e.center?.lat, lng: e.lon ?? e.center?.lon, name: e.tags?.name, phone: e.tags?.phone || e.tags?.['contact:phone'] }))
-        .filter((g: any) => g.lat != null && g.name)
-        .map((g: any) => ({ ...g, km: +(haversineKm({ lat, lng }, g) * PRICING.roadFactor).toFixed(1) }))
-        .sort((a: Garage, b: Garage) => a.km - b.km)
-        .slice(0, 6);
-      this.cache.set(key, { at: Date.now(), data });
-      return data;
-    } catch (e: any) {
-      this.log.warn(`garage lookup failed: ${e.message}; skipping OSM for 2 min`);
-      this.downUntil = Date.now() + 2 * 60_000;
-      return [];
+    if (hit && Date.now() - hit.at < 15 * 60_000) return hit.data; // short: "open now" changes during the night
+    let data: Garage[] | null = null;
+    if (config.googlePlacesKey) data = await this.fromGoogle(lat, lng).catch(e => { this.log.warn(`Google Places failed: ${e.message}`); return null; });
+    if (!data && Date.now() >= this.osmDownUntil) {
+      data = await this.fromOsm(lat, lng).catch(e => { this.log.warn(`OSM lookup failed: ${e.message}; skipping OSM for 2 min`); this.osmDownUntil = Date.now() + 2 * 60_000; return null; });
     }
+    if (!data) return [];
+    data = data.map(g => ({ ...g, km: +(haversineKm({ lat, lng }, g) * PRICING.roadFactor).toFixed(1) }))
+      // Open garages first (when known), then nearest.
+      .sort((a, b) => Number(b.openNow === true) - Number(a.openNow === true) || a.km - b.km)
+      .slice(0, 6);
+    this.cache.set(key, { at: Date.now(), data });
+    return data;
+  }
+
+  /** Google Places API (New): Nearby Search, type car_repair, 20 km, ranked by distance. */
+  private async fromGoogle(lat: number, lng: number): Promise<Garage[]> {
+    const res = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': config.googlePlacesKey,
+        // Only the fields we use (also keeps the per-call price in the cheaper tier).
+        'X-Goog-FieldMask': 'places.displayName,places.location,places.nationalPhoneNumber,places.currentOpeningHours.openNow,places.rating,places.businessStatus',
+      },
+      body: JSON.stringify({
+        includedTypes: ['car_repair'], maxResultCount: 15, rankPreference: 'DISTANCE',
+        locationRestriction: { circle: { center: { latitude: lat, longitude: lng }, radius: 20000 } },
+      }),
+      signal: AbortSignal.timeout(6_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${(await res.text()).slice(0, 160)}`);
+    const out: any = await res.json();
+    return (out.places || [])
+      .filter((p: any) => p.location && p.displayName?.text && (p.businessStatus ?? 'OPERATIONAL') === 'OPERATIONAL')
+      .map((p: any) => ({
+        name: p.displayName.text, lat: p.location.latitude, lng: p.location.longitude, km: 0,
+        phone: p.nationalPhoneNumber || undefined, openNow: p.currentOpeningHours?.openNow ?? null, rating: p.rating ?? null, source: 'google' as const,
+      }));
+  }
+
+  /** OpenStreetMap via Overpass (free, no key). Coverage in India is patchy and public servers are often overloaded. */
+  private async fromOsm(lat: number, lng: number): Promise<Garage[]> {
+    const q = `[out:json][timeout:8];(node["shop"="car_repair"](around:20000,${lat},${lng});way["shop"="car_repair"](around:20000,${lat},${lng}););out center 60;`;
+    let out: any = null, lastErr = '';
+    for (const url of ['https://overpass-api.de/api/interpreter', 'https://overpass.private.coffee/api/interpreter']) {
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json', 'User-Agent': 'OnSpot/0.1 (roadside assistance app)' },
+          body: 'data=' + encodeURIComponent(q), signal: AbortSignal.timeout(6_000),
+        });
+        if (!res.ok) { lastErr = `${new URL(url).host} ${res.status}`; continue; }
+        out = await res.json();
+        break;
+      } catch (e: any) { lastErr = `${new URL(url).host} ${e.message}`; }
+    }
+    if (!out) throw new Error(lastErr);
+    return (out.elements || [])
+      .map((e: any) => ({ lat: e.lat ?? e.center?.lat, lng: e.lon ?? e.center?.lon, name: e.tags?.name, phone: e.tags?.phone || e.tags?.['contact:phone'] }))
+      .filter((g: any) => g.lat != null && g.name)
+      .map((g: any) => ({ ...g, km: 0, openNow: null, rating: null, source: 'osm' as const }));
   }
 }
 

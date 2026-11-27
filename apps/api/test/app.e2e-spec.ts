@@ -382,3 +382,42 @@ describe('review fixes and new features', () => {
     config.otpPerIpPer15Min = prev;
   });
 });
+
+describe('nearby garages (Google Places)', () => {
+  it('asks Google for car repair shops nearby, lists open ones first, and falls back when Google fails', async () => {
+    const cust = await login('9876500077', 'CUSTOMER', 'Garage Tester');
+    const prev = { driver: config.placesDriver, key: config.googlePlacesKey };
+    const realFetch = global.fetch;
+    const seen: { url: string; headers: any; body: any }[] = [];
+    let googleDown = false;
+    global.fetch = (async (url: any, init: any) => {
+      const u = String(url);
+      if (u.startsWith('https://places.googleapis.com/')) {
+        seen.push({ url: u, headers: init.headers, body: JSON.parse(init.body) });
+        if (googleDown) return new Response('quota exceeded', { status: 429 });
+        return new Response(JSON.stringify({ places: [
+          { displayName: { text: 'Closed Motors' }, location: { latitude: 18.756, longitude: 73.407 }, currentOpeningHours: { openNow: false }, businessStatus: 'OPERATIONAL' },
+          { displayName: { text: 'Shut For Good Garage' }, location: { latitude: 18.755, longitude: 73.406 }, businessStatus: 'CLOSED_PERMANENTLY' },
+          { displayName: { text: 'Highway Auto Works' }, location: { latitude: 18.79, longitude: 73.43 }, nationalPhoneNumber: '098230 12345', currentOpeningHours: { openNow: true }, rating: 4.4, businessStatus: 'OPERATIONAL' },
+        ] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      if (u.includes('overpass')) return new Response(JSON.stringify({ elements: [{ lat: 18.76, lon: 73.41, tags: { name: 'OSM Garage' } }] }), { status: 200 });
+      return realFetch(url, init);
+    }) as any;
+    try {
+      config.placesDriver = 'on'; config.googlePlacesKey = 'test-key';
+      const g = (await http().get('/v1/places/garages?lat=18.7546&lng=73.4062').set(auth(cust.token)).expect(200)).body;
+      expect(seen[0].headers['X-Goog-Api-Key']).toBe('test-key');
+      expect(seen[0].headers['X-Goog-FieldMask']).toContain('places.currentOpeningHours.openNow');
+      expect(seen[0].body).toMatchObject({ includedTypes: ['car_repair'], rankPreference: 'DISTANCE', locationRestriction: { circle: { radius: 20000 } } });
+      expect(g.map((x: any) => x.name)).toEqual(['Highway Auto Works', 'Closed Motors']); // open first; permanently closed dropped
+      expect(g[0]).toMatchObject({ openNow: true, rating: 4.4, phone: '098230 12345', source: 'google' });
+      expect(g[0].km).toBeGreaterThan(g[1].km); // ordering is by open-now, not distance
+      googleDown = true; // different cell, so not served from cache
+      const fb = (await http().get('/v1/places/garages?lat=18.80&lng=73.45').set(auth(cust.token)).expect(200)).body;
+      expect(fb.map((x: any) => [x.name, x.source])).toEqual([['OSM Garage', 'osm']]);
+    } finally {
+      global.fetch = realFetch; config.placesDriver = prev.driver; config.googlePlacesKey = prev.key;
+    }
+  });
+});

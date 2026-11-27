@@ -15,7 +15,7 @@ OnSpot/
 └── prototype/       Original zero-dependency clickable prototype (kept for demos)
 ```
 
-Docs: [PRD](docs/PRD.md) · [Architecture](docs/ARCHITECTURE.md) · [Roadmap](docs/ROADMAP.md) · [Prototype](prototype/README.md)
+Docs: [PRD](docs/PRD.md) · [Architecture](docs/ARCHITECTURE.md) · [Roadmap](docs/ROADMAP.md) · [Status / what's left](docs/STATUS.md) · [Prototype](prototype/README.md)
 
 ## Run it locally
 
@@ -67,7 +67,7 @@ Then open **http://localhost:5173/side-by-side.html**: customer app, partner app
 - **Late-arrival guard**: if a partner is 10+ minutes past the arrival time they accepted with, the customer can switch to the next nearest pro for free; the partner and ops are told.
 - **Highway safety card** while waiting (hazard lights, behind the barrier, verify the plate before sharing the code) with a **"no internet? send my location by SMS"** fallback.
 - **Top-rated pros only**: optional booking setting, dispatches only to verified pros rated 4.5★+.
-- **Real tow destinations**: nearby garages from OpenStreetMap, or pin a drop point on the map.
+- **Real tow destinations**: nearby garages from Google Places (open-now first, with phone and rating; set `GOOGLE_PLACES_API_KEY`), falling back to OpenStreetMap, or pin a drop point on the map.
 - **Tips** (100% to the partner) and **Report a problem** → ops **Disputes** queue with refunds capped at what was paid.
 - **Partner demand hotspots**: where and when requests happen near them (last 30 days), with directions.
 - Offers expire on the server's clock (no fresh 20 s timer on app reopen); apps and console resync after a network drop.
@@ -102,7 +102,7 @@ End-to-end tests run against a real Nest app, Postgres (`onspot_test`), Redis (d
 | Jobs (customer) | `GET jobs/availability`, `POST jobs/quote`, `POST jobs`, `POST jobs/:id/{addons/:aid/decision, pay, tip, rate, dispute, switch, messages, sos, cancel}` |
 | Jobs (partner) | `POST jobs/:id/{accept, decline, arrived, start, addons, complete, cash-received, messages, cancel}` |
 | Partner | `GET/PATCH provider/me`, `GET provider/hotspots`, `POST provider/{kyc, status, location}` |
-| Places | `GET places/garages?lat&lng` (OpenStreetMap; empty list when unavailable) |
+| Places | `GET places/garages?lat&lng` (Google Places → OpenStreetMap; empty list when unavailable) |
 | Payments | `POST payments/razorpay/verify` |
 | Ops | `GET admin/{overview, live, providers, jobs, jobs/:id, disputes}`, `POST admin/providers/:id/{kyc, suspend}`, `POST admin/disputes/:id/resolve` |
 
@@ -116,14 +116,6 @@ Realtime (Socket.IO, `auth: { token }`): `job.updated`, `job.offer`, `job.offer_
 - **Dispatch** is a 1-second loop with an expanding radius (8 → 15 → 30 → 50 km, 3-minute timeout). Shield members start wider. Move it to BullMQ when running more than one API instance.
 - **One mobile app, two modes** (customer or partner, chosen at sign-in) for Phase 1 speed. Splitting into two store listings later only needs separate app configs.
 
-## Not done yet (Phase 1 remaining)
+## What's left
 
-- Real SMS (MSG91) for OTP and SOS contacts (currently logged); background location for partners
-- Garage lookup uses the free public OpenStreetMap Overpass servers, which are often overloaded; run our own instance or a paid places API before launch
-- Tips and dispute refunds are recorded but not yet charged/refunded through a payment gateway
-- Push delivery verified only up to the API boundary (tests); needs an EAS project + FCM/APNs credentials and a device to confirm end to end
-- Ops console sign-in uses the same phone OTP; add role-based staff accounts and an audit log before real ops use
-- Razorpay checkout in the app (the server order creation and signature verification exist but are untested without keys)
-- Native device testing: so far only the web build has been checked visually; the maps on iOS/Android are untested
-- Migrate navigation to Expo Router (recommended in `apps/mobile/AGENTS.md`)
-- Refresh tokens, rate limiting at the gateway, KYC document upload (images to S3) and DigiLocker verification
+See **[docs/STATUS.md](docs/STATUS.md)**: what's built, and what's left in launch order (tier 1 = before real users).

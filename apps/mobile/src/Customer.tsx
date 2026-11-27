@@ -162,7 +162,7 @@ function Home({ spot, setSpot, avail, onPick, onLocate }: { spot: LatLng & { lab
 }
 
 // ---------------------------------------------------------------- quote / booking
-type Drop = LatLng & { name: string; km: number; phone?: string };
+type Drop = LatLng & { name: string; km: number; phone?: string; openNow?: boolean | null; rating?: number | null; source?: 'google' | 'osm' };
 
 function QuoteScreen({ service, spot, me, drop, setDrop, pickingDrop, setPickingDrop, onBack, onCreated, onShield }: {
   service: ServiceCode; spot: LatLng & { label: string }; me: Profile | null; drop: Drop | null; setDrop: (d: Drop | null) => void;
@@ -203,13 +203,17 @@ function QuoteScreen({ service, spot, me, drop, setDrop, pickingDrop, setPicking
       </Row>
       {service === 'tow' && <>
         <T s="h3" style={{ marginBottom: 4 }}>Tow to</T>
-        <T s="xs" style={{ marginBottom: 10 }}>Garages near you from OpenStreetMap. Call ahead at night to check they're open.</T>
+        <T s="xs" style={{ marginBottom: 10 }}>{garages?.some(g => g.openNow != null) ? 'Open garages are listed first.' : "Call ahead at night to check they're open."}</T>
         {garages === null && <T s="sm" style={{ color: C.muted, marginBottom: 10 }}>Finding garages near you…</T>}
         {garages?.length === 0 && <T s="sm" style={{ color: C.muted, marginBottom: 10 }}>No garages found nearby. Choose a drop point on the map.</T>}
         {garages?.map(g => { const on = drop?.lat === g.lat && drop?.lng === g.lng; return (
           <Pressable key={`${g.lat},${g.lng}`} onPress={() => setDrop(g)} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, borderRadius: 12, borderWidth: on ? 2 : 1, borderColor: on ? C.ink : C.line2, marginBottom: 8 }}>
             <Icon name={on ? 'check-circle' : 'circle'} size={18} color={on ? C.ink : C.muted} />
-            <View style={{ flex: 1 }}><T s="sm" style={{ fontWeight: '600' }} numberOfLines={1}>{g.name}</T><T s="xs">{g.km} km away</T></View>
+            <View style={{ flex: 1 }}><T s="sm" style={{ fontWeight: '600' }} numberOfLines={1}>{g.name}</T>
+              <Row gap={6} style={{ marginTop: 2 }}>
+                {g.openNow != null && <Pill tone={g.openNow ? 'ok' : 'gray'} text={g.openNow ? 'Open now' : 'Closed'} />}
+                <T s="xs">{g.km} km away{g.rating ? ` · ★ ${g.rating.toFixed(1)}` : ''}</T>
+              </Row></View>
             {g.phone && <Pressable onPress={() => Linking.openURL(`tel:${g.phone}`)} accessibilityLabel={`Call ${g.name}`}><IconCircle name="phone" size={34} /></Pressable>}
           </Pressable>); })}
         {drop && !garages?.some(g => g.lat === drop.lat && g.lng === drop.lng) && <Card soft><Row><Icon name="flag" size={16} /><T s="sm" style={{ flex: 1 }}>Drop point pinned on the map</T></Row></Card>}
