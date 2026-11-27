@@ -20,6 +20,10 @@ export const config = {
   dispatchTickMs: +(process.env.DISPATCH_TICK_MS || 1000),
   publicUrl: (process.env.PUBLIC_WEB_URL || `http://localhost:${process.env.PORT || 4100}`).replace(/\/$/, ''), // base for share links (/t/:id)
   offerTtlSec: 20,
+  timeZone: process.env.TZ_NAME || 'Asia/Kolkata', // IST: "night" pricing and all displayed times use this zone
+  uploadDir: process.env.UPLOAD_DIR || require('path').join(process.cwd(), 'uploads'), // proof-of-work photos (S3 in production)
+  arriveRadiusM: 150, // auto-mark "arrived" within this distance of the pickup
+  arriveTapMaxKm: 0.5, // reject an "I've arrived" tap from further away than this
   lateGraceMin: +(process.env.LATE_GRACE_MIN ?? 10), // minutes past the promised arrival before the customer can switch for free
   topRatedMin: 4.5,
   otpPerIpPer15Min: +(process.env.OTP_PER_IP ?? 20),

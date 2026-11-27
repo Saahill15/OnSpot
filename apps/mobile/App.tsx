@@ -3,7 +3,7 @@ import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, View } from 'react-native';
 import { closeSocket, getSocket, loadSession, saveSession, Session } from './src/api';
 import Auth from './src/Auth';
-import { ToastHost } from './src/common';
+import { ConfirmHost, ToastHost } from './src/common';
 import Customer from './src/Customer';
 import Partner from './src/Partner';
 import { onNotificationTap, registerForPush, unregisterPush } from './src/push';
@@ -36,6 +36,7 @@ export default function App() {
     <View style={{ flex: 1, backgroundColor: '#fff' }}>
       {screen}
       <ToastHost />
+      <ConfirmHost />
       <StatusBar style="dark" />
     </View>
   );

@@ -1,12 +1,13 @@
 // HTTP API. Thin controllers: validation + auth here, rules live in JobsService.
-import { BadRequestException, Body, Controller, ForbiddenException, Get, GoneException, HttpCode, NotFoundException, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, ForbiddenException, Get, GoneException, Header, HttpCode, NotFoundException, Param, Patch, Post, Query, StreamableFile, UseGuards } from '@nestjs/common';
+import { createReadStream, existsSync } from 'fs';
 import { Type } from 'class-transformer';
 import { ArrayMaxSize, IsArray, IsBoolean, IsIn, IsInt, IsLatitude, IsLongitude, IsNumber, IsOptional, IsString, Length, Matches, Max, Min, ValidateNested } from 'class-validator';
 import { Prisma } from '@prisma/client';
 import { ACTIVE_STATUSES, EVENTS, isServiceCode, PRICING, SERVICES, ServiceCode } from '@onspot/shared';
 import { AuthGuard, AuthUser, CurrentUser, Roles } from './auth';
 import { GeoService, PlacesService, PrismaService, PushService, RealtimeService } from './infra';
-import { JobsService, jobView } from './jobs.service';
+import { JobsService, jobView, trustOf, verifyPhotoSig } from './jobs.service';
 
 // ---------------------------------------------------------------- DTOs
 class Point { @IsLatitude() lat!: number; @IsLongitude() lng!: number; @IsOptional() @IsString() @Length(0, 120) label?: string; }
@@ -22,6 +23,11 @@ class CreateJobDto extends QuoteDto {
   @IsOptional() @IsBoolean() topRatedOnly?: boolean;
 }
 class TipDto { @IsInt() @Min(10) @Max(2000) amount!: number; }
+class PhotoDto {
+  @IsIn(['BEFORE', 'AFTER']) kind!: 'BEFORE' | 'AFTER';
+  @IsIn(['image/jpeg', 'image/png', 'image/webp']) mime!: string;
+  @IsString() @Length(100, 7_500_000) data!: string; // base64, ≤ ~5 MB decoded
+}
 class DisputeDto {
   @IsIn(['OVERCHARGED', 'NO_SHOW', 'BAD_SERVICE', 'DAMAGE', 'SAFETY', 'OTHER']) reason!: string;
   @IsOptional() @IsString() @Length(0, 500) details?: string;
@@ -66,6 +72,14 @@ export class PublicController {
   @Get('health') health() { return { ok: true, geo: this.geo.index.kind }; }
   @Get('catalog') catalog() { return { services: SERVICES, pricing: PRICING }; }
   /** Family tracking link: no codes, phones, chat or notes. */
+  /** Proof-of-work photo. The link is signed and expires (see photoUrl), so photos aren't publicly listable. */
+  @Get('photos/:id') @Header('Cache-Control', 'private, max-age=3600')
+  async photo(@Param('id') id: string, @Query('exp') exp: string, @Query('sig') sig: string) {
+    if (!verifyPhotoSig(id, +exp, String(sig || ''))) throw new ForbiddenException('This photo link has expired');
+    const f = await this.jobs.photoFile(id);
+    if (!existsSync(f.path)) throw new NotFoundException('Photo not found');
+    return new StreamableFile(createReadStream(f.path), { type: f.mime });
+  }
   @Get('track/:id') async track(@Param('id') id: string) {
     const j = await this.jobs.load(id);
     // Privacy: family links stop working 2 hours after the trip ends.
@@ -130,6 +144,7 @@ export class JobsController {
   @Post(':id/pay') @HttpCode(200) @Roles('CUSTOMER') pay(@CurrentUser() u: AuthUser, @Param('id') id: string, @Body() b: PayDto) { return this.jobs.pay(u, id, b.method); }
   @Post(':id/rate') @HttpCode(200) rate(@CurrentUser() u: AuthUser, @Param('id') id: string, @Body() b: RateDto) { return this.jobs.rate(u, id, b.stars, b.comment); }
   @Post(':id/messages') @HttpCode(200) message(@CurrentUser() u: AuthUser, @Param('id') id: string, @Body() b: MessageDto) { return this.jobs.message(u, id, b.text); }
+  @Post(':id/photos') @HttpCode(200) @Roles('PROVIDER') photo(@CurrentUser() u: AuthUser, @Param('id') id: string, @Body() b: PhotoDto) { return this.jobs.addPhoto(u, id, b.kind, b.data, b.mime); }
   @Post(':id/cash-received') @HttpCode(200) @Roles('PROVIDER') cash(@CurrentUser() u: AuthUser, @Param('id') id: string) { return this.jobs.cashReceived(u, id); }
   @Post(':id/tip') @HttpCode(200) @Roles('CUSTOMER') tip(@CurrentUser() u: AuthUser, @Param('id') id: string, @Body() b: TipDto) { return this.jobs.tip(u, id, b.amount); }
   @Post(':id/dispute') @HttpCode(200) @Roles('CUSTOMER') dispute(@CurrentUser() u: AuthUser, @Param('id') id: string, @Body() b: DisputeDto) { return this.jobs.dispute(u, id, b.reason, b.details); }
@@ -160,7 +175,7 @@ export class ProviderController {
     return { provider: this.view(p), activeJob: active, offers: p.activeJobId ? [] : await this.jobs.offersFor(u.sub) };
   }
   private view(p: any) {
-    return { id: p.userId, name: p.user?.name, services: p.services, vehicleNo: p.vehicleNo, online: p.online, lat: p.lat, lng: p.lng, rating: +p.rating.toFixed(2), ratingCount: p.ratingCount, kycStatus: p.kycStatus, suspended: p.suspended, earnings: p.earnings, jobsDone: p.jobsDone, activeJobId: p.activeJobId };
+    return { trust: trustOf(p), id: p.userId, name: p.user?.name, services: p.services, vehicleNo: p.vehicleNo, online: p.online, lat: p.lat, lng: p.lng, rating: +p.rating.toFixed(2), ratingCount: p.ratingCount, kycStatus: p.kycStatus, suspended: p.suspended, earnings: p.earnings, jobsDone: p.jobsDone, activeJobId: p.activeJobId };
   }
   @Patch('me') async update(@CurrentUser() u: AuthUser, @Body() b: ProviderProfileDto) {
     if (b.services && !b.services.every(isServiceCode)) throw new BadRequestException('Unknown service');
@@ -267,7 +282,7 @@ export class AdminController {
   }
   @Get('providers') async providers() {
     const list = await this.db.provider.findMany({ include: { user: true }, orderBy: { updatedAt: 'desc' } });
-    return list.map(p => ({ id: p.userId, name: p.user.name, phone: p.user.phone, services: p.services, vehicleNo: p.vehicleNo, online: p.online, onJob: !!p.activeJobId, rating: +p.rating.toFixed(2), ratingCount: p.ratingCount, jobsDone: p.jobsDone, earnings: p.earnings, kycStatus: p.kycStatus, kycDocs: p.kycDocs, suspended: p.suspended, lat: p.lat, lng: p.lng }));
+    return list.map(p => ({ id: p.userId, name: p.user.name, phone: p.user.phone, services: p.services, vehicleNo: p.vehicleNo, online: p.online, onJob: !!p.activeJobId, rating: +p.rating.toFixed(2), ratingCount: p.ratingCount, jobsDone: p.jobsDone, earnings: p.earnings, kycStatus: p.kycStatus, kycDocs: p.kycDocs, suspended: p.suspended, lat: p.lat, lng: p.lng, trust: trustOf(p) }));
   }
   @Post('providers/:id/kyc') @HttpCode(200) async kyc(@Param('id') id: string, @Body() b: KycDecisionDto) {
     const p = await this.db.provider.findUnique({ where: { userId: id } });

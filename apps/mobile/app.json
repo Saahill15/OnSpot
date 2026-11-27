@@ -10,7 +10,10 @@
       "supportsTablet": false,
       "bundleIdentifier": "app.onspot.mobile",
       "infoPlist": {
-        "UIBackgroundModes": ["location", "remote-notification"]
+        "UIBackgroundModes": [
+          "location",
+          "remote-notification"
+        ]
       }
     },
     "android": {
@@ -22,7 +25,10 @@
       },
       "predictiveBackGestureEnabled": false,
       "package": "app.onspot.mobile",
-      "permissions": ["android.permission.POST_NOTIFICATIONS", "android.permission.VIBRATE"]
+      "permissions": [
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.VIBRATE"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -44,6 +50,14 @@
         "expo-notifications",
         {
           "color": "#FF385C"
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "Partners take before/after photos of the job as proof of work.",
+          "photosPermission": false,
+          "microphonePermission": false
         }
       ]
     ]

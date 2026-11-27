@@ -57,7 +57,8 @@ const page = (id: string) => `<!doctype html>
   var me = null, pro = null, line = null, fitted = false, timer = null;
   var icon = function (css) { return L.divIcon({ className: '', html: '<div class="mk" style="' + css + '"></div>', iconSize: [0, 0] }); };
   function el(tag, attrs, text) { var e = document.createElement(tag); for (var k in attrs || {}) e.setAttribute(k, attrs[k]); if (text != null) e.textContent = text; return e; }
-  function hhmm(d) { return new Date(d).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
+  // IST (UTC+5:30, no daylight saving), whatever the viewer's device zone.
+  function hhmm(d) { var t = new Date(new Date(d).getTime() + 330 * 60000), h = t.getUTCHours(); return (h % 12 || 12) + ':' + String(t.getUTCMinutes()).padStart(2, '0') + (h < 12 ? ' AM' : ' PM') + ' IST'; }
 
   function render(j) {
     var s = document.getElementById('sheet'); s.textContent = '';

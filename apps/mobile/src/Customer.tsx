@@ -4,10 +4,10 @@ import { Animated, Easing, Linking, Platform, Pressable, ScrollView, Share, Text
 import * as Location from 'expo-location';
 import { CANCEL_REASONS, EVENTS, LatLng, Quote, SERVICES, ServiceCode, SERVICE_BY_CODE } from '@onspot/shared';
 import { api, getSession, getSocket, PUBLIC_URL } from './api';
-import { act, ACTIVE, ChatPanel, confirm, JobView, Stars, Steps, Timeline, toast } from './common';
+import { act, ACTIVE, ChatPanel, confirm, JobView, PhotoStrip, Stars, Steps, Timeline, toast, TrustBadge } from './common';
 import Map from './Map';
 import type { MapMarker } from './mapTypes';
-import { Avatar, BillLines, BottomCTA, Button, C, Card, Divider, hhmm, Icon, IconCircle, IconName, Input, Pill, Row, rupee, SERVICE_ICON, T } from './ui';
+import { Avatar, BillLines, BottomCTA, Button, C, Card, Divider, dayMonth, fullDate, hhmm, Icon, IconCircle, IconName, Input, ListGroup, ListRow, Pill, Row, rupee, SERVICE_ICON, SubHeader, T } from './ui';
 
 const DEMO_SPOT = { lat: 18.7546, lng: 73.4062, label: 'Lonavala, Mumbai–Pune Expressway' };
 const SYMPTOMS: [string, ServiceCode, IconName][] = [["Won't start", 'battery', 'battery-charging'], ['Flat tyre', 'puncture', 'disc'], ['Out of fuel', 'fuel', 'droplet'], ["Can't drive it", 'tow', 'truck'], ['Noise or smoke', 'mechanic', 'tool'], ['Locked out', 'locksmith', 'key'], ['Water leak', 'plumber', 'droplet'], ['No power', 'electrician', 'zap']];
@@ -195,19 +195,25 @@ function QuoteScreen({ service, spot, me, drop, setDrop, pickingDrop, setPicking
     const j = await act(() => api<JobView>('/jobs', { body: { service, pickup: { lat: spot.lat, lng: spot.lng, label: spot.label }, drop: drop && { lat: drop.lat, lng: drop.lng }, notes, topRatedOnly: topRated, vehicle: v ? `${v.model} ${v.plate}`.trim() : '' } }));
     setBusy(false); if (j) onCreated(j);
   };
+  const [showGarages, setShowGarages] = useState(false);
+  const [showPrice, setShowPrice] = useState(false);
+  const [noteOpen, setNoteOpen] = useState(false);
+  const selectedGarage = garages?.find(g => drop?.lat === g.lat && drop?.lng === g.lng);
   return (
     <>
       <Row gap={14} style={{ marginBottom: 18 }}>
         <Pressable onPress={onBack} accessibilityLabel="Back" style={{ width: 40, height: 40, borderRadius: 20, borderWidth: 1, borderColor: C.line2, alignItems: 'center', justifyContent: 'center' }}><Icon name="arrow-left" size={18} /></Pressable>
         <IconCircle name={SERVICE_ICON[service]} /><View style={{ flex: 1 }}><T s="h2">{s.name}</T><T s="xs">{s.desc}</T></View>
       </Row>
-      {service === 'tow' && <>
-        <T s="h3" style={{ marginBottom: 4 }}>Tow to</T>
-        <T s="xs" style={{ marginBottom: 10 }}>{garages?.some(g => g.openNow != null) ? 'Open garages are listed first.' : "Call ahead at night to check they're open."}</T>
-        {garages === null && <T s="sm" style={{ color: C.muted, marginBottom: 10 }}>Finding garages near you…</T>}
-        {garages?.length === 0 && <T s="sm" style={{ color: C.muted, marginBottom: 10 }}>No garages found nearby. Choose a drop point on the map.</T>}
-        {garages?.map(g => { const on = drop?.lat === g.lat && drop?.lng === g.lng; return (
-          <Pressable key={`${g.lat},${g.lng}`} onPress={() => setDrop(g)} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, borderRadius: 12, borderWidth: on ? 2 : 1, borderColor: on ? C.ink : C.line2, marginBottom: 8 }}>
+
+      {service === 'tow' && <ListGroup title="Tow to">
+        {garages === null && <T s="sm" style={{ color: C.muted, padding: 16 }}>Finding garages near you…</T>}
+        {garages !== null && !showGarages && (garages.length > 0 || !!drop) && <ListRow icon="flag"
+          title={selectedGarage ? selectedGarage.name : drop ? 'Drop point pinned on the map' : 'Choose where to tow'}
+          value={selectedGarage ? `${selectedGarage.openNow == null ? '' : selectedGarage.openNow ? 'Open now · ' : 'Closed · '}${selectedGarage.km} km away${selectedGarage.rating ? ` · ★ ${selectedGarage.rating.toFixed(1)}` : ''} · tap to change` : garages.length ? `${garages.length} garages nearby · tap to pick` : 'No garages found nearby'}
+          onPress={() => setShowGarages(true)} />}
+        {showGarages && garages?.map(g => { const on = drop?.lat === g.lat && drop?.lng === g.lng; return (
+          <Pressable key={`${g.lat},${g.lng}`} onPress={() => { setDrop(g); setShowGarages(false); }} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 12 }}>
             <Icon name={on ? 'check-circle' : 'circle'} size={18} color={on ? C.ink : C.muted} />
             <View style={{ flex: 1 }}><T s="sm" style={{ fontWeight: '600' }} numberOfLines={1}>{g.name}</T>
               <Row gap={6} style={{ marginTop: 2 }}>
@@ -216,26 +222,37 @@ function QuoteScreen({ service, spot, me, drop, setDrop, pickingDrop, setPicking
               </Row></View>
             {g.phone && <Pressable onPress={() => Linking.openURL(`tel:${g.phone}`)} accessibilityLabel={`Call ${g.name}`}><IconCircle name="phone" size={34} /></Pressable>}
           </Pressable>); })}
-        {drop && !garages?.some(g => g.lat === drop.lat && g.lng === drop.lng) && <Card soft><Row><Icon name="flag" size={16} /><T s="sm" style={{ flex: 1 }}>Drop point pinned on the map</T></Row></Card>}
-        <Button kind="ghost" small icon="map-pin" title={pickingDrop ? 'Tap the map above…' : 'Choose drop point on map'} onPress={() => setPickingDrop(!pickingDrop)} style={{ alignSelf: 'flex-start', paddingHorizontal: 0 }} />
-      </>}
-      {!ready ? null : !q ? <View style={{ height: 180, borderRadius: 14, backgroundColor: C.surface2, marginVertical: 12 }} /> : <>
-        <Row gap={0} style={{ borderWidth: 1, borderColor: C.line, borderRadius: 14, marginVertical: 14 }}>
+        {(showGarages || garages?.length === 0) && <ListRow icon="map-pin" title={pickingDrop ? 'Tap the map above…' : 'Choose drop point on map'} onPress={() => { setPickingDrop(!pickingDrop); setShowGarages(false); }} />}
+      </ListGroup>}
+
+      {!ready ? null : !q ? <View style={{ height: 120, borderRadius: 14, backgroundColor: C.surface2, marginBottom: 20 }} /> : <>
+        <Row gap={0} style={{ borderWidth: 1, borderColor: C.line, borderRadius: 14, marginBottom: 20 }}>
           {[[`${q.quote.etaMin} min`, 'arrival'], [String(q.nearby), 'pros nearby'], [q.quote.night ? 'Night' : 'Day', 'rates']].map(([b, l], i) =>
             <View key={l} style={{ flex: 1, alignItems: 'center', paddingVertical: 12, borderLeftWidth: i ? 1 : 0, borderLeftColor: C.line }}><T s="h3" style={{ fontSize: 18 }}>{b}</T><T s="xs">{l}</T></View>)}
         </Row>
-        <T s="h3" style={{ fontSize: 18, marginBottom: 12 }}>Price details</T>
-        <BillLines lines={q.quote.lines} total={q.quote.total} />
-        <Card soft style={{ marginTop: 14 }}><Row style={{ alignItems: 'flex-start' }}><Icon name="lock" size={18} /><T s="sm" style={{ flex: 1, color: C.ink2 }}><T s="sm" style={{ fontWeight: '600' }}>This price is locked.</T> The provider can't charge more. Any parts or tolls appear here for you to approve or decline.</T></Row></Card>
-        {!q.quote.shield && <Button kind="ghost" small title={`Save ${rupee(19)} on every request with Shield`} onPress={onShield} style={{ alignSelf: 'flex-start', paddingHorizontal: 0 }} />}
+        <ListGroup title="Price">
+          <Pressable onPress={() => setShowPrice(!showPrice)} accessibilityRole="button" style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 14 }}>
+            <Icon name="lock" size={19} />
+            <View style={{ flex: 1 }}><T s="body" style={{ fontWeight: '500' }}>Locked at {rupee(q.quote.total)}</T><T s="xs">The pro can't charge more. Extras need your approval.</T></View>
+            <T s="sm" style={{ textDecorationLine: 'underline' }}>{showPrice ? 'Hide' : 'Details'}</T>
+          </Pressable>
+          {showPrice && <View style={{ paddingHorizontal: 16, paddingBottom: 6, paddingTop: 10 }}><BillLines lines={q.quote.lines} total={q.quote.total} /></View>}
+          {!q.quote.shield && <ListRow icon="shield" title={`Save ${rupee(19)} on every request`} value="With OnSpot Shield" onPress={onShield} />}
+        </ListGroup>
       </>}
-      <Pressable onPress={() => setTopRated(!topRated)} accessibilityRole="switch" accessibilityState={{ checked: topRated }} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, marginBottom: 6 }}>
-        <IconCircle name="award" size={38} bg={topRated ? C.ink : C.surface2} color={topRated ? '#fff' : C.ink} />
-        <View style={{ flex: 1 }}><T s="sm" style={{ fontWeight: '600' }}>Top-rated pros only</T><T s="xs">Verified pros rated 4.5★ or higher. May take a little longer.</T></View>
-        <View style={{ width: 46, height: 28, borderRadius: 14, backgroundColor: topRated ? C.ok : C.line2, padding: 3, alignItems: topRated ? 'flex-end' : 'flex-start' }}><View style={{ width: 22, height: 22, borderRadius: 11, backgroundColor: '#fff' }} /></View>
-      </Pressable>
-      {me?.vehicle?.model ? <Row style={{ marginVertical: 8 }}><Icon name="truck" size={16} color={C.muted} /><T s="sm" style={{ color: C.muted }}>{me.vehicle.model} · {me.vehicle.plate}</T></Row> : null}
-      <Input placeholder="Anything the provider should know? e.g. white Swift, front-left tyre" value={notes} onChangeText={setNotes} multiline style={{ minHeight: 64, textAlignVertical: 'top' }} />
+
+      <ListGroup title="Options">
+        <Pressable onPress={() => setTopRated(!topRated)} accessibilityRole="switch" accessibilityState={{ checked: topRated }} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 12 }}>
+          <Icon name="award" size={19} />
+          <View style={{ flex: 1 }}><T s="body" style={{ fontWeight: '500' }}>Top-rated pros only</T><T s="xs">4.5★ and up. May take a little longer.</T></View>
+          <View style={{ width: 46, height: 28, borderRadius: 14, backgroundColor: topRated ? C.ok : C.line2, padding: 3, alignItems: topRated ? 'flex-end' : 'flex-start' }}><View style={{ width: 22, height: 22, borderRadius: 11, backgroundColor: '#fff' }} /></View>
+        </Pressable>
+        {noteOpen
+          ? <View style={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 2 }}><Input autoFocus placeholder="e.g. white Swift, front-left tyre" value={notes} onChangeText={setNotes} multiline style={{ minHeight: 60, textAlignVertical: 'top' }} /></View>
+          : <ListRow icon="edit-3" title="Note for the pro" value={notes || 'Help them find you faster'} onPress={() => setNoteOpen(true)} />}
+        {!!me?.vehicle?.model && <Row gap={12} style={{ paddingHorizontal: 16, paddingVertical: 14 }}><Icon name="truck" size={19} /><View style={{ flex: 1 }}><T s="body" style={{ fontWeight: '500' }}>{me.vehicle.model}</T><T s="xs">{me.vehicle.plate || 'Your vehicle'}</T></View></Row>}
+      </ListGroup>
+
       <BottomCTA>
       <Divider />
       <Row>
@@ -270,7 +287,7 @@ function Searching({ job, me }: { job: JobView; me: Profile | null }) {
 /** Highway safety while waiting: the most dangerous part of a breakdown is standing next to traffic.
  *  Includes an SMS fallback for when there's no mobile data. */
 function SafetyCard({ job, me }: { job: JobView; me: Profile | null }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   if (SERVICE_BY_CODE[job.service].group !== 'Roadside') return null;
   const tips: [IconName, string][] = [
     ['alert-triangle', 'Hazard lights on. Park as far to the left as you safely can.'],
@@ -342,7 +359,7 @@ function LiveTrip({ job, setJob, me }: { job: JobView; setJob: (j: JobView) => v
     await Share.share({ message: `I'm getting ${SERVICE_BY_CODE[job.service].name} help via OnSpot from ${p.name} (${p.vehicleNo || 'verified provider'}). Track live: ${url}` }).catch(() => {});
   };
   const sos = async () => {
-    if (!(await confirm('Send SOS?', 'Our ops team and your emergency contacts will get your live location.', 'Send SOS'))) return;
+    if (!(await confirm('Send SOS?', 'Our ops team and your emergency contacts will get your live location.', 'Send SOS', true))) return;
     const r = await act(() => api(`/jobs/${job.id}/sos`, { body: {} }));
     if (r) toast(r.notified ? `SOS sent. ${r.notified} contact(s) notified.` : 'SOS sent. Add emergency contacts in Account.', 'err');
   };
@@ -362,7 +379,7 @@ function LiveTrip({ job, setJob, me }: { job: JobView; setJob: (j: JobView) => v
       ))}
       <Row gap={14} style={{ paddingVertical: 16, borderTopWidth: 1, borderBottomWidth: 1, borderColor: C.line }}>
         <Avatar name={p.name} />
-        <View style={{ flex: 1 }}><T s="h3" numberOfLines={1}>{p.name}</T><Row gap={6} style={{ marginTop: 3 }}>{p.verified && <Pill tone="gray" icon="check" text="Verified" />}<T s="xs">★ {p.rating.toFixed(1)} · {p.ratingCount} jobs</T></Row></View>
+        <View style={{ flex: 1 }}><T s="h3" numberOfLines={1}>{p.name}</T><Row gap={6} style={{ marginTop: 3 }}>{p.verified && <Pill tone="gray" icon="check" text="Verified" />}<T s="xs">★ {p.rating.toFixed(1)} · {p.ratingCount} jobs</T></Row><View style={{ marginTop: 6 }}><TrustBadge t={p.trust} /></View></View>
         {!!p.vehicleNo && <View style={{ borderWidth: 1, borderColor: C.line2, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2 }}><T s="xs" style={{ color: C.ink2, fontWeight: '600' }}>{p.vehicleNo}</T></View>}
       </Row>
       {job.status !== 'IN_PROGRESS' && job.startCode && <Row style={{ paddingVertical: 16, borderBottomWidth: 1, borderColor: C.line }}>
@@ -414,6 +431,7 @@ function Bill({ job, setJob }: { job: JobView; setJob: (j: JobView) => void }) {
       <Steps status="COMPLETED" />
       <T s="h2">Job done. Review and pay.</T>
       <T s="sm" style={{ color: C.muted, marginTop: 4, marginBottom: 16 }}>{job.provider?.name} finished at {hhmm(job.completedAt!)}.</T>
+      <PhotoStrip photos={job.photos} />
       <BillLines lines={[...job.quote.lines, ...approved.map(a => ({ label: `${a.label} (approved)`, amount: a.amount, extra: true }))]} total={job.finalAmount!} totalLabel="Total payable" />
       <Card soft style={{ marginTop: 14 }}><Row style={{ alignItems: 'flex-start' }}><Icon name="check-circle" size={18} color={C.ok} /><T s="sm" style={{ flex: 1, color: C.ink2 }}>{job.finalAmount! > job.total ? `Locked fare ${rupee(job.total)} + ${rupee(job.finalAmount! - job.total)} in extras you approved.` : 'Exactly your locked fare.'} Nothing else can be added.</T></Row></Card>
       <T s="h3" style={{ marginTop: 8, marginBottom: 10 }}>Pay with</T>
@@ -516,6 +534,7 @@ function Ended({ job, setJob, onDone, onRetry }: { job: JobView; setJob: (j: Job
       <T s="sm" style={{ textAlign: 'center', color: C.muted, marginTop: 6, marginBottom: 18 }}>
         {paid ? `Receipt ${job.payment?.ref}${job.tip ? ` · ${rupee(job.tip)} tip` : ''}` : np ? 'We searched up to 50 km. Try again in a minute, or call a helpline.' : job.cancelFee ? `A ₹${job.cancelFee} visit fee applies as the provider had arrived.` : 'No charge was applied.'}
       </T>
+      {paid && <PhotoStrip photos={job.photos} />}
       {np && <Card><Row style={{ justifyContent: 'space-between' }}><T s="sm">National emergency</T><Pressable onPress={() => Linking.openURL('tel:112')}><T s="h3">112</T></Pressable></Row><Divider /><Row style={{ justifyContent: 'space-between' }}><T s="sm">NHAI highway helpline</T><Pressable onPress={() => Linking.openURL('tel:1033')}><T s="h3">1033</T></Pressable></Row></Card>}
       {job.dispute && <DisputeStatus d={job.dispute} />}
       {reporting && <ReportProblem job={job} onDone={j => { setJob(j); setReporting(false); }} onClose={() => setReporting(false)} />}
@@ -542,11 +561,12 @@ function Activity() {
         list.map(j => <View key={j.id} style={{ borderBottomWidth: 1, borderBottomColor: C.line }}>
           <Pressable onPress={() => setOpen(open === j.id ? null : j.id)}><Row gap={12} style={{ paddingVertical: 12 }}>
             <IconCircle name={SERVICE_ICON[j.service]} size={38} />
-            <View style={{ flex: 1 }}><T s="h3" style={{ fontSize: 15 }}>{SERVICE_BY_CODE[j.service].name}</T><T s="xs">{new Date(j.createdAt).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} · {hhmm(j.createdAt)}{j.provider ? ` · ${j.provider.name}` : ''}</T></View>
+            <View style={{ flex: 1 }}><T s="h3" style={{ fontSize: 15 }}>{SERVICE_BY_CODE[j.service].name}</T><T s="xs">{dayMonth(j.createdAt)} · {hhmm(j.createdAt)}{j.provider ? ` · ${j.provider.name}` : ''}</T></View>
             <View style={{ alignItems: 'flex-end', gap: 4 }}><T s="h3" style={{ fontSize: 14 }}>{rupee((j.finalAmount ?? j.total) + (j.tip || 0))}</T><Pill tone={j.dispute ? 'warn' : j.status === 'PAID' ? 'ok' : ['CANCELLED', 'NO_PROVIDER'].includes(j.status) ? 'gray' : 'accent'} text={j.dispute ? (j.dispute.status === 'RESOLVED' ? 'Report resolved' : 'Reported') : label[j.status]} /></View>
           </Row></Pressable>
           {open === j.id && <View style={{ paddingBottom: 12 }}>
             {j.payment && <T s="xs" style={{ marginBottom: 8 }}>Paid {rupee(j.payment.amount)} via {j.payment.method.toUpperCase()} · ref {j.payment.ref}{j.tip ? ` · ${rupee(j.tip)} tip` : ''}</T>}
+            <PhotoStrip photos={j.photos} />
             {j.dispute && <DisputeStatus d={j.dispute} />}
             {reporting === j.id ? <ReportProblem job={j} onDone={x => { replace(x); setReporting(null); }} onClose={() => setReporting(null)} />
               : !j.dispute && j.provider && ['PAID', 'COMPLETED', 'CANCELLED'].includes(j.status) && <Button kind="outline" small icon="flag" title="Report a problem" onPress={() => setReporting(j.id)} style={{ alignSelf: 'flex-start' }} />}
@@ -557,32 +577,69 @@ function Activity() {
 }
 
 function Account({ me, setMe, onSignOut }: { me: Profile | null; setMe: (p: Profile) => void; onSignOut: () => void }) {
+  const [page, setPage] = useState<'home' | 'vehicle' | 'contacts' | 'shield'>('home');
   const [model, setModel] = useState(me?.vehicle?.model || '');
   const [plate, setPlate] = useState(me?.vehicle?.plate || '');
   const [contacts, setContacts] = useState(() => [0, 1, 2].map(i => me?.contacts?.[i] || { name: '', phone: '' }));
-  const save = (body: object, msg: string) => act(() => api<Profile>('/me', { method: 'PATCH', body })).then(r => { if (r) { setMe(r); toast(msg, 'ok'); } });
+  const [busy, setBusy] = useState(false);
+  const save = async (body: object, msg: string, back = true) => {
+    setBusy(true); const r = await act(() => api<Profile>('/me', { method: 'PATCH', body })); setBusy(false);
+    if (r) { setMe(r); toast(msg, 'ok'); if (back) setPage('home'); }
+  };
   if (!me) return null;
-  return (
+  const home = () => setPage('home');
+  const savedContacts = me.contacts?.filter(c => c.name && c.phone) || [];
+
+  if (page === 'vehicle') return (
     <>
-      <Row gap={14} style={{ marginBottom: 22 }}><Avatar name={me.name} size={60} /><View><T s="h2">{me.name}</T><T s="sm" style={{ color: C.muted }}>+91 {me.phone}</T></View></Row>
-      <View style={{ backgroundColor: C.ink, borderRadius: 20, padding: 20, marginBottom: 8 }}>
-        <Row><Icon name="shield" size={22} color="#fff" /><T s="h3" style={{ color: '#fff', flex: 1 }}>OnSpot Shield{me.shield ? ' · Active' : ''}</T>{!me.shield && <T s="h3" style={{ color: '#fff' }}>₹99<T s="xs" style={{ color: 'rgba(255,255,255,.7)' }}> / month</T></T>}</Row>
-        <T s="sm" style={{ color: 'rgba(255,255,255,.75)', marginVertical: 10 }}>{me.shield ? `No platform fee and priority dispatch. Renews ${new Date(me.shieldUntil!).toLocaleDateString()}.` : 'No platform fee on any request, and priority dispatch with a wider search from the first second.'}</T>
-        <Button small kind={me.shield ? 'ghost' : 'outline'} title={me.shield ? 'Cancel plan' : 'Activate (demo, no charge)'} onPress={() => save({ shield: !me.shield }, me.shield ? 'Shield cancelled' : 'Shield is active')} style={me.shield ? {} : { alignSelf: 'flex-start' }} />
-      </View>
-      <T s="h3" style={{ fontSize: 18, marginTop: 22, marginBottom: 12 }}>My vehicle</T>
+      <SubHeader title="My vehicle" sub="Pros see this so they bring the right tools and parts." onBack={home} />
       <Input label="Make and model" value={model} onChangeText={setModel} placeholder="Maruti Swift" />
       <Input label="Number plate" value={plate} onChangeText={t => setPlate(t.toUpperCase())} placeholder="MH 12 AB 1234" autoCapitalize="characters" />
-      <Button kind="outline" title="Save vehicle" onPress={() => save({ vehicle: { model, plate, fuel: me.vehicle?.fuel || 'petrol' } }, 'Vehicle saved')} />
-      <T s="h3" style={{ fontSize: 18, marginTop: 26, marginBottom: 4 }}>Emergency contacts</T>
-      <T s="xs" style={{ marginBottom: 12 }}>They receive your live location when you press SOS.</T>
-      {contacts.map((c, i) => <Row key={i} style={{ marginBottom: -6 }}>
-        <View style={{ flex: 1 }}><Input placeholder="Name" value={c.name} onChangeText={t => setContacts(cs => cs.map((x, j) => j === i ? { ...x, name: t } : x))} /></View>
-        <View style={{ flex: 1 }}><Input placeholder="Phone" keyboardType="phone-pad" value={c.phone} onChangeText={t => setContacts(cs => cs.map((x, j) => j === i ? { ...x, phone: t.replace(/\D/g, '').slice(0, 10) } : x))} /></View>
-      </Row>)}
-      <Button kind="outline" title="Save contacts" onPress={() => save({ contacts: contacts.filter(c => c.name.trim() && c.phone) }, 'Emergency contacts saved')} style={{ marginTop: 6 }} />
-      <Divider />
-      <Button kind="danger" title="Sign out" onPress={onSignOut} />
+      <BottomCTA><Button kind="dark" title="Save vehicle" loading={busy} onPress={() => save({ vehicle: { model, plate, fuel: me.vehicle?.fuel || 'petrol' } }, 'Vehicle saved')} /></BottomCTA>
+    </>
+  );
+  if (page === 'contacts') return (
+    <>
+      <SubHeader title="Emergency contacts" sub="Up to 3 people. They get your live location when you press SOS." onBack={home} />
+      {contacts.map((c, i) => (
+        <View key={i} style={{ marginBottom: 6 }}>
+          <T s="label" style={{ marginBottom: 6 }}>Contact {i + 1}</T>
+          <Row style={{ marginBottom: -6 }}>
+            <View style={{ flex: 1 }}><Input placeholder="Name" value={c.name} onChangeText={t => setContacts(cs => cs.map((x, j) => j === i ? { ...x, name: t } : x))} /></View>
+            <View style={{ flex: 1 }}><Input placeholder="Phone" keyboardType="phone-pad" value={c.phone} onChangeText={t => setContacts(cs => cs.map((x, j) => j === i ? { ...x, phone: t.replace(/D/g, '').slice(0, 10) } : x))} /></View>
+          </Row>
+        </View>))}
+      <BottomCTA><Button kind="dark" title="Save contacts" loading={busy} onPress={() => save({ contacts: contacts.filter(c => c.name.trim() && c.phone) }, 'Emergency contacts saved')} /></BottomCTA>
+    </>
+  );
+  if (page === 'shield') return (
+    <>
+      <SubHeader title="OnSpot Shield" sub={me.shield ? `Active. Renews ${fullDate(me.shieldUntil!)}.` : '₹99 a month. Cancel any time.'} onBack={home} />
+      {([['percent', 'No platform fee', 'On every request, any service.'], ['zap', 'Priority dispatch', 'A wider search from the first second, so help comes sooner.'], ['shield', 'Same Fair Price Lock', 'Your fare is still locked before anyone is sent.']] as const).map(([i, t, d]) =>
+        <Row key={t} gap={14} style={{ alignItems: 'flex-start', marginBottom: 18 }}><IconCircle name={i} size={40} /><View style={{ flex: 1 }}><T s="h3" style={{ fontSize: 15 }}>{t}</T><T s="sm" style={{ color: C.muted }}>{d}</T></View></Row>)}
+      <BottomCTA><Button kind={me.shield ? 'outline' : 'dark'} loading={busy} title={me.shield ? 'Cancel plan' : 'Activate (demo, no charge)'} onPress={() => save({ shield: !me.shield }, me.shield ? 'Shield cancelled' : 'Shield is active')} /></BottomCTA>
+    </>
+  );
+  return (
+    <>
+      <T s="h1" style={{ marginBottom: 18 }}>Account</T>
+      <Row gap={14} style={{ marginBottom: 22 }}><Avatar name={me.name} size={56} /><View style={{ flex: 1 }}><T s="h2" style={{ fontSize: 20 }}>{me.name}</T><T s="sm" style={{ color: C.muted }}>+91 {me.phone}</T></View></Row>
+      <Pressable onPress={() => setPage('shield')} style={{ backgroundColor: C.ink, borderRadius: 16, padding: 16, marginBottom: 22, flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+        <Icon name="shield" size={22} color="#fff" />
+        <View style={{ flex: 1 }}><T s="h3" style={{ color: '#fff', fontSize: 15 }}>OnSpot Shield{me.shield ? ' · Active' : ''}</T><T s="xs" style={{ color: 'rgba(255,255,255,.7)' }}>{me.shield ? `Renews ${fullDate(me.shieldUntil!)}` : 'No platform fee + priority dispatch · ₹99/mo'}</T></View>
+        <Icon name="chevron-right" size={18} color="rgba(255,255,255,.7)" />
+      </Pressable>
+      <ListGroup title="Your details">
+        <ListRow icon="truck" title="My vehicle" value={me.vehicle?.plate ? [me.vehicle.model, me.vehicle.plate].filter(Boolean).join(' · ') : 'Add your car or bike'} onPress={() => setPage('vehicle')} />
+        <ListRow icon="users" title="Emergency contacts" value={savedContacts.length ? savedContacts.map(c => c.name).join(', ') : 'Add people to alert on SOS'} onPress={() => setPage('contacts')} />
+      </ListGroup>
+      <ListGroup title="Help">
+        <ListRow icon="phone-call" title="Emergency 112" value="National emergency number" onPress={() => Linking.openURL('tel:112')} />
+        <ListRow icon="phone" title="NHAI highway helpline 1033" onPress={() => Linking.openURL('tel:1033')} />
+      </ListGroup>
+      <ListGroup>
+        <ListRow icon="log-out" title="Sign out" danger onPress={async () => { if (await confirm('Sign out?', 'You can sign back in with your phone number any time.', 'Sign out', true)) onSignOut(); }} />
+      </ListGroup>
     </>
   );
 }

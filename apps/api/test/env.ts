@@ -8,3 +8,4 @@ process.env.DISPATCH_TICK_MS = '300';
 process.env.PUSH_DRIVER = 'memory';
 process.env.OTP_PER_IP = '1000';
 process.env.PLACES_DRIVER = 'off'; // no network calls to OpenStreetMap in tests
+process.env.UPLOAD_DIR = require('path').join(require('os').tmpdir(), 'onspot-test-uploads');

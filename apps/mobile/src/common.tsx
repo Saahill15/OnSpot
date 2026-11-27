@@ -1,15 +1,17 @@
 // Cross-screen pieces: toast, confirm, chat, timeline, star picker, and the JobView type.
 import React, { useEffect, useRef, useState } from 'react';
-import { Alert, Animated, Platform, Pressable, ScrollView, TextInput, View } from 'react-native';
+import { Alert, Animated, Image, Linking, Platform, Pressable, ScrollView, TextInput, View } from 'react-native';
 import type { Quote, ServiceCode } from '@onspot/shared';
-import { C, hhmm, Icon, Row, T } from './ui';
+import { Button, C, hhmm, Icon, Pill, Row, T } from './ui';
 
 export interface JobView {
   id: string; status: string; service: ServiceCode; pickup: { lat: number; lng: number; label: string }; drop: { lat: number; lng: number } | null;
   quote: Quote; total: number; platformFee: number; finalAmount: number | null; providerPayout?: number | null; eta: number | null; radiusKm: number; offeredCount: number;
   startCode?: string; notes?: string; vehicle: string;
   customer: { name: string; phone?: string };
-  provider: null | { id: string; name: string; phone?: string; rating: number; ratingCount: number; vehicleNo: string; verified: boolean; lat: number | null; lng: number | null };
+  provider: null | { id: string; name: string; phone?: string; rating: number; ratingCount: number; vehicleNo: string; verified: boolean; lat: number | null; lng: number | null; trust: Trust };
+  photos?: { id: string; kind: 'BEFORE' | 'AFTER'; at: string; url: string }[];
+  arrivedAuto: boolean;
   addons: { id: string; label: string; amount: number; reason: string; status: 'PENDING' | 'APPROVED' | 'REJECTED' }[];
   messages?: { id: string; from: 'CUSTOMER' | 'PROVIDER'; text: string; at: string }[];
   events: { text: string; at: string }[];
@@ -20,6 +22,33 @@ export interface JobView {
   dispute?: null | { id: string; reason: string; details: string; status: "OPEN" | "RESOLVED"; resolution: string | null; refundAmount: number };
 }
 export const ACTIVE = ['SEARCHING', 'ASSIGNED', 'ARRIVED', 'IN_PROGRESS'];
+export interface Trust { score: number | null; onTimePct: number | null; reliabilityPct: number | null; cleanStreak: number; overchargeRefunds: number; jobsDone: number }
+
+/** Compact trust line for customers: score + the most reassuring fact, or "New partner" until there's history. */
+export function TrustBadge({ t }: { t?: Trust }) {
+  if (!t) return null;
+  if (t.score == null) return null; // not enough arrivals yet: show nothing rather than a misleading label
+  const tone = t.score >= 85 ? 'ok' : t.score >= 70 ? 'warn' : 'gray';
+  return <Row gap={6}><Pill tone={tone} icon="shield" text={`Trust ${t.score}`} />{t.onTimePct != null && <T s="xs">{t.onTimePct}% on time</T>}</Row>;
+}
+
+/** Proof-of-work thumbnails (before/after). Tapping opens the full photo. */
+export function PhotoStrip({ photos, title = 'Proof of work', by = 'by the partner' }: { photos?: JobView['photos']; title?: string; by?: string }) {
+  if (!photos?.length) return null;
+  return (
+    <View style={{ marginVertical: 12 }}>
+      <Row style={{ marginBottom: 8 }}><Icon name="camera" size={16} /><T s="h3" style={{ fontSize: 15, flex: 1 }}>{title}</T>{!!by && <T s="xs">{by}</T>}</Row>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+        {photos.map(p => (
+          <Pressable key={p.id} onPress={() => Linking.openURL(p.url)} accessibilityLabel={`${p.kind === 'BEFORE' ? 'Before' : 'After'} photo`} style={{ marginRight: 8 }}>
+            <Image source={{ uri: p.url }} style={{ width: 96, height: 96, borderRadius: 12, backgroundColor: C.surface2 }} />
+            <View style={{ position: 'absolute', left: 6, bottom: 6, backgroundColor: 'rgba(0,0,0,.65)', borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2 }}>
+              <T s="xs" style={{ color: '#fff', fontSize: 10.5 }}>{p.kind === 'BEFORE' ? 'Before' : 'After'} · {hhmm(p.at)}</T></View>
+          </Pressable>))}
+      </ScrollView>
+    </View>
+  );
+}
 
 // ---------------------------------------------------------------- toast
 type ToastMsg = { text: string; tone: 'ok' | 'err' | 'info' };
@@ -46,9 +75,44 @@ export function ToastHost() {
   );
 }
 
-export async function confirm(title: string, message: string, ok = 'OK'): Promise<boolean> {
-  if (Platform.OS === 'web') return window.confirm(`${title}\n\n${message}`);
-  return new Promise(res => Alert.alert(title, message, [{ text: 'Cancel', style: 'cancel', onPress: () => res(false) }, { text: ok, style: 'destructive', onPress: () => res(true) }]));
+// ---------------------------------------------------------------- confirm sheet
+// In-app bottom sheet instead of the browser/OS alert box, so confirmations look like the rest of OnSpot.
+type ConfirmReq = { title: string; message: string; ok: string; danger: boolean; resolve: (v: boolean) => void };
+let openConfirm: ((r: ConfirmReq) => void) | null = null;
+
+export function confirm(title: string, message: string, ok = 'OK', danger = false): Promise<boolean> {
+  return new Promise(resolve => {
+    if (openConfirm) openConfirm({ title, message, ok, danger, resolve });
+    else if (Platform.OS === 'web') resolve(window.confirm(`${title}\n\n${message}`)); // host not mounted yet
+    else Alert.alert(title, message, [{ text: 'Cancel', style: 'cancel', onPress: () => resolve(false) }, { text: ok, onPress: () => resolve(true) }]);
+  });
+}
+
+export function ConfirmHost() {
+  const [req, setReq] = useState<ConfirmReq | null>(null);
+  const anim = useRef(new Animated.Value(0)).current;
+  const native = Platform.OS !== 'web';
+  useEffect(() => {
+    openConfirm = r => { setReq(r); anim.setValue(0); Animated.timing(anim, { toValue: 1, duration: 180, useNativeDriver: native }).start(); };
+    return () => { openConfirm = null; };
+  }, []);
+  if (!req) return null;
+  const close = (v: boolean) => Animated.timing(anim, { toValue: 0, duration: 140, useNativeDriver: native }).start(() => { setReq(null); req.resolve(v); });
+  return (
+    <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 200, justifyContent: 'flex-end' }}>
+      <Animated.View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,.4)', opacity: anim }}>
+        <Pressable style={{ flex: 1 }} onPress={() => close(false)} accessibilityLabel="Cancel" />
+      </Animated.View>
+      <Animated.View accessibilityRole="alert" style={{ backgroundColor: '#fff', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingBottom: 28,
+        transform: [{ translateY: anim.interpolate({ inputRange: [0, 1], outputRange: [320, 0] }) }] }}>
+        <View style={{ alignSelf: 'center', width: 36, height: 4, borderRadius: 2, backgroundColor: C.line2, marginTop: -10, marginBottom: 18 }} />
+        <T s="h2" style={{ fontSize: 20 }}>{req.title}</T>
+        <T s="sm" style={{ color: C.muted, marginTop: 6, marginBottom: 22 }}>{req.message}</T>
+        <Button kind={req.danger ? 'danger' : 'dark'} title={req.ok} onPress={() => close(true)} />
+        <Button kind="ghost" title="Cancel" onPress={() => close(false)} style={{ marginTop: 6 }} />
+      </Animated.View>
+    </View>
+  );
 }
 
 /** Runs an async action and surfaces errors as a toast. */

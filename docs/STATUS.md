@@ -4,7 +4,12 @@ Last reviewed: 27 Nov 2026. Feature ideas (incl. unique ones): [IDEAS.md](IDEAS.
 
 ## Built and tested
 
-- **API** (NestJS, Postgres, Redis GEO, Socket.IO) with 23 end-to-end tests: phone OTP login, KYC gate, Fair Price Lock quotes, real-time dispatch with expanding radius and race-safe accept, offer expiry, start code, extras approval, cash confirmation, tips, disputes with capped refunds, late-arrival guard with free switch, top-rated-only dispatch, chat, SOS, family tracking API, push notifications (Expo), partner suspension, demand hotspots, nearby garages (Google Places with OpenStreetMap fallback), ops metrics.
+- **API** (NestJS, Postgres, Redis GEO, Socket.IO) with 28 end-to-end tests: phone OTP login, KYC gate, Fair Price Lock quotes, real-time dispatch with expanding radius and race-safe accept, offer expiry, start code, extras approval, cash confirmation, tips, disputes with capped refunds, late-arrival guard with free switch, top-rated-only dispatch, chat, SOS, family tracking API, push notifications (Expo), partner suspension, demand hotspots, nearby garages (Google Places with OpenStreetMap fallback), ops metrics.
+- **Proof of work**: partners add up to 3 before and 3 after photos (checked file type, 5 MB max). Customers see them on the bill, receipt and Activity through signed links that expire; ops see them in the job drawer.
+- **Automatic arrival**: the partner is marked arrived within 150 m of the customer, and "I've arrived" taps from more than 0.5 km away are rejected.
+- **Partner trust score**: 60% on-time arrivals + 25% kept jobs + up to 15 for no refunded overcharges, shown after 3 arrivals (customer pro card, partner dashboard, ops Partners table).
+- **IST everywhere**: night pricing is judged in Asia/Kolkata whatever the server zone, and every displayed time is IST.
+- **Cleaner screens**: Account and the partner dashboard are grouped lists with sub-pages; the quote screen keeps garages, price details and notes collapsed until needed; confirmations use an in-app sheet (ops: an in-app dialog) instead of the browser pop-up.
 - **Family tracking page** at `/t/<id>`: live map, status and ETA, no private data, link expires 2 h after the trip.
 - **Partner background location** (native): battery-friendly while waiting, high accuracy during a job, Play-policy disclosure before the permission prompt.
 - **Android build setup**: EAS profiles, permissions, Maps/Firebase keys from env ([ANDROID.md](ANDROID.md)).

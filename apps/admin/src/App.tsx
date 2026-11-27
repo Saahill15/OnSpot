@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ACTIVE_STATUSES, EVENTS, SERVICE_BY_CODE, ServiceCode } from '@onspot/shared';
-import { ago, api, getSession, hhmm, opsSocket, rupee, setSession } from './api';
+import { ago, api, dayMonth, getSession, hhmm, opsSocket, rupee, setSession } from './api';
 import LiveMap, { LiveJob, LiveProvider } from './LiveMap';
 
 // ---------------------------------------------------------------- icons (Lucide-style line icons)
@@ -37,7 +37,7 @@ interface DisputeRow {
 }
 const REASON: Record<string, string> = { OVERCHARGED: 'Overcharged', NO_SHOW: 'Pro did not show up', BAD_SERVICE: 'Problem not fixed', DAMAGE: 'Damage', SAFETY: 'Safety concern', OTHER: 'Other' };
 interface JobRow { id: string; status: string; service: string; total: number; finalAmount: number | null; createdAt: string; customer: { name: string }; provider: { user: { name: string } } | null }
-interface ProviderRow { id: string; name: string; phone: string; services: string[]; vehicleNo: string; online: boolean; onJob: boolean; rating: number; ratingCount: number; jobsDone: number; earnings: number; kycStatus: string; kycDocs: any; suspended: boolean }
+interface ProviderRow { id: string; name: string; phone: string; services: string[]; vehicleNo: string; online: boolean; onJob: boolean; rating: number; ratingCount: number; jobsDone: number; earnings: number; kycStatus: string; kycDocs: any; suspended: boolean; trust?: { score: number | null; onTimePct: number | null; reliabilityPct: number | null; cleanStreak: number; overchargeRefunds: number } }
 interface Sos { jobId: string; customer: string; phone: string; at: number }
 
 export default function App() {
@@ -189,7 +189,7 @@ function JobsPage({ jobs, onOpen }: { jobs: JobRow[]; onOpen: (id: string) => vo
       <div className="panel tbl">
         <table><thead><tr><th>Time</th><th>Service</th><th>Customer</th><th>Partner</th><th>Status</th><th style={{ textAlign: 'right' }}>Amount</th></tr></thead>
           <tbody>{rows.map(j => <tr key={j.id} onClick={() => onOpen(j.id)}>
-            <td>{hhmm(j.createdAt)} <span className="muted xs">{new Date(j.createdAt).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}</span></td>
+            <td>{hhmm(j.createdAt)} <span className="muted xs">{dayMonth(j.createdAt)}</span></td>
             <td><span className="row"><Icon n={j.service} s={16} />{svcName(j.service)}</span></td>
             <td>{j.customer.name}</td><td>{j.provider?.user.name ?? <span className="muted">—</span>}</td>
             <td><Status s={j.status} /></td><td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{rupee(j.finalAmount ?? j.total)}</td>
@@ -203,8 +203,23 @@ function JobsPage({ jobs, onOpen }: { jobs: JobRow[]; onOpen: (id: string) => vo
 function PartnersPage({ providers, reload, flash }: { providers: ProviderRow[]; reload: () => Promise<void>; flash: (t: string, err?: boolean) => void }) {
   const queue = providers.filter(p => p.kycStatus === 'SUBMITTED');
   const act = async (fn: () => Promise<unknown>, msg: string) => { try { await fn(); flash(msg); await reload(); } catch (e: any) { flash(e.message, true); } };
+  const [suspending, setSuspending] = useState<ProviderRow | null>(null);
+  const [reason, setReason] = useState('');
   return (
     <>
+      {suspending && <>
+        <div className="scrim" onClick={() => setSuspending(null)} />
+        <div className="dialog" role="dialog" aria-label={`Suspend ${suspending.name}`}>
+          <h2>Suspend {suspending.name}?</h2>
+          <p className="muted sm">They go offline straight away and get no new jobs until you reinstate them.</p>
+          <label className="xs muted" htmlFor="suspend-reason">Reason (sent to the partner)</label>
+          <textarea id="suspend-reason" autoFocus rows={3} value={reason} onChange={e => setReason(e.target.value)} placeholder="e.g. Repeated overcharging complaints" />
+          <div className="row" style={{ justifyContent: 'flex-end', marginTop: 14 }}>
+            <button className="btn" onClick={() => setSuspending(null)}>Cancel</button>
+            <button className="btn dark" onClick={() => { const p = suspending; setSuspending(null); act(() => api(`/admin/providers/${p.id}/suspend`, { suspended: true, reason }), `${p.name} suspended`); }}>Suspend</button>
+          </div>
+        </div>
+      </>}
       <div className="page-head"><div><h1>Partners</h1><div className="muted">Verify new partners and manage who can receive jobs.</div></div></div>
       <div className="panel" style={{ marginBottom: 20 }}>
         <h2>KYC queue {queue.length > 0 && <span className="pill accent">{queue.length} to review</span>}</h2>
@@ -220,16 +235,17 @@ function PartnersPage({ providers, reload, flash }: { providers: ProviderRow[]; 
       </div>
       <div className="panel tbl">
         <h2>All partners</h2>
-        <table><thead><tr><th>Partner</th><th>Status</th><th>Services</th><th>Rating</th><th>Jobs</th><th>Earnings</th><th>KYC</th><th></th></tr></thead>
+        <table><thead><tr><th>Partner</th><th>Status</th><th>Services</th><th>Rating</th><th title="60% on-time arrivals + 25% kept jobs + up to 15 for no overcharge refunds. Shown after 3 arrivals.">Trust</th><th>Jobs</th><th>Earnings</th><th>KYC</th><th></th></tr></thead>
           <tbody>{providers.map(p => <tr key={p.id} style={{ cursor: 'default' }}>
             <td><b>{p.name}</b><div className="xs muted">+91 {p.phone}{p.vehicleNo ? ` · ${p.vehicleNo}` : ''}</div></td>
             <td>{p.suspended ? <span className="pill bad">Suspended</span> : p.onJob ? <span className="pill accent">On a job</span> : p.online ? <span className="pill ok"><span className="dot" />Online</span> : <span className="pill">Offline</span>}</td>
             <td className="sm">{p.services.map(svcName).join(', ') || <span className="muted">—</span>}</td>
-            <td>★ {p.rating.toFixed(1)} <span className="xs muted">({p.ratingCount})</span></td><td>{p.jobsDone}</td><td>{rupee(p.earnings)}</td>
+            <td>★ {p.rating.toFixed(1)} <span className="xs muted">({p.ratingCount})</span></td>
+            <td>{p.trust?.score == null ? <span className="muted">New</span> : <><span className={`pill ${p.trust.score >= 85 ? 'ok' : p.trust.score >= 70 ? 'warn' : 'bad'}`}>{p.trust.score}</span><div className="xs muted">{p.trust.onTimePct}% on time{p.trust.overchargeRefunds ? ` · ${p.trust.overchargeRefunds} refund${p.trust.overchargeRefunds > 1 ? 's' : ''}` : ''}</div></>}</td><td>{p.jobsDone}</td><td>{rupee(p.earnings)}</td>
             <td><span className={`pill ${p.kycStatus === 'VERIFIED' ? 'ok' : p.kycStatus === 'SUBMITTED' ? 'warn' : p.kycStatus === 'REJECTED' ? 'bad' : ''}`}>{p.kycStatus.toLowerCase()}</span></td>
             <td>{p.suspended
               ? <button className="btn sm" onClick={() => act(() => api(`/admin/providers/${p.id}/suspend`, { suspended: false }), `${p.name} reinstated`)}>Reinstate</button>
-              : <button className="btn sm danger" onClick={() => { const reason = prompt(`Suspend ${p.name}? They will be taken offline and get no new jobs.\n\nReason (sent to the partner):`); if (reason !== null) act(() => api(`/admin/providers/${p.id}/suspend`, { suspended: true, reason }), `${p.name} suspended`); }}>Suspend</button>}</td>
+              : <button className="btn sm danger" onClick={() => { setReason(''); setSuspending(p); }}>Suspend</button>}</td>
           </tr>)}</tbody></table>
       </div>
     </>
@@ -303,7 +319,7 @@ function JobDrawer({ id, onClose }: { id: string; onClose: () => void }) {
           <div className="row" style={{ flexWrap: 'wrap' }}><Status s={j.status} /><span className="muted xs">{j.id}</span></div>
           <div className="sec">People</div>
           <div className="row sm" style={{ marginBottom: 6 }}><span className="grow"><b>Customer</b> · {j.customer.name}</span><span className="muted">{j.customer.phone}</span></div>
-          <div className="row sm"><span className="grow"><b>Partner</b> · {j.provider ? `${j.provider.name}${j.provider.verified ? ' ✓' : ''} · ★ ${j.provider.rating}` : 'not assigned'}</span><span className="muted">{j.provider?.vehicleNo}</span></div>
+          <div className="row sm"><span className="grow"><b>Partner</b> · {j.provider ? `${j.provider.name}${j.provider.verified ? ' ✓' : ''} · ★ ${j.provider.rating}${j.provider.trust?.score != null ? ` · trust ${j.provider.trust.score}` : ''}` : 'not assigned'}</span><span className="muted">{j.provider?.vehicleNo}</span></div>
           <div className="sec">Location</div>
           <div className="sm">{j.pickup.label || `${j.pickup.lat.toFixed(5)}, ${j.pickup.lng.toFixed(5)}`} · <a href={`https://www.google.com/maps?q=${j.pickup.lat},${j.pickup.lng}`} target="_blank" rel="noreferrer">Open in Maps</a></div>
           {j.notes && <div className="sm muted" style={{ marginTop: 4 }}>“{j.notes}”</div>}
@@ -317,14 +333,14 @@ function JobDrawer({ id, onClose }: { id: string; onClose: () => void }) {
             {j.cancelReason && <div className="li xs"><span>Cancel reason</span><span>{j.cancelReason}{j.cancelFee ? ` · ₹${j.cancelFee} fee` : ''}</span></div>}
             {j.tip > 0 && <div className="li xs"><span>Tip to partner</span><span>{rupee(j.tip)}</span></div>}
           </div>
-          {(j.late || j.topRatedOnly || j.payment?.status === 'PENDING_CASH' || j.dispute) && <div className="row" style={{ flexWrap: 'wrap', marginTop: 12 }}>
+          {(j.late || j.arrivedAuto || j.topRatedOnly || j.payment?.status === 'PENDING_CASH' || j.dispute) && <div className="row" style={{ flexWrap: 'wrap', marginTop: 12 }}>
             {j.late && <span className="pill warn">Partner running late</span>}
+            {j.arrivedAuto && <span className="pill ok">Arrival confirmed by location</span>}
             {j.topRatedOnly && <span className="pill">Top-rated pros only</span>}
             {j.payment?.status === 'PENDING_CASH' && <span className="pill warn">Cash, awaiting partner confirmation</span>}
             {j.dispute && <span className={`pill ${j.dispute.status === 'OPEN' ? 'bad' : 'ok'}`}>Dispute: {REASON[j.dispute.reason] ?? j.dispute.reason} · {j.dispute.status.toLowerCase()}</span>}
           </div>}
-          <div>{/* keeps the following sections in the drawer's flow */}
-          </div>
+          {j.photos?.length > 0 && <><div className="sec">Proof of work</div><div className="photos">{j.photos.map((p: any) => <a key={p.id} href={p.url} target="_blank" rel="noreferrer"><img src={p.url} alt={`${p.kind.toLowerCase()} photo`} /><span>{p.kind === 'BEFORE' ? 'Before' : 'After'} · {hhmm(p.at)}</span></a>)}</div></>}
           {j.messages?.length > 0 && <><div className="sec">Chat</div>{j.messages.map((m: any) => <div key={m.id} className={`msg ${m.from}`}>{m.text}<div className="xs" style={{ opacity: .6 }}>{m.from === 'PROVIDER' ? 'Partner' : 'Customer'} · {hhmm(m.at)}</div></div>)}</>}
           {Object.keys(j.ratings).length > 0 && <><div className="sec">Ratings</div>{Object.entries(j.ratings).map(([by, r]: any) => <div key={by} className="sm">{by === 'CUSTOMER' ? 'Customer → partner' : 'Partner → customer'}: ★ {r.stars}{r.comment ? ` · “${r.comment}”` : ''}</div>)}</>}
           <div className="sec">Timeline</div>

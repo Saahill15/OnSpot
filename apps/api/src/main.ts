@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { Logger, Module, RequestMethod, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { JwtModule, JwtService } from '@nestjs/jwt';
 import { OnGatewayConnection, OnGatewayInit, WebSocketGateway } from '@nestjs/websockets';
 import type { Server, Socket } from 'socket.io';
@@ -33,7 +34,8 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection {
 export class AppModule {}
 
 export async function createApp() {
-  const app = await NestFactory.create(AppModule, { logger: process.env.NODE_ENV === 'test' ? ['error'] : undefined });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { logger: process.env.NODE_ENV === 'test' ? ['error'] : undefined });
+  app.useBodyParser('json', { limit: '8mb' }); // proof-of-work photos are sent as base64 (≤ 5 MB each)
   app.enableCors({ origin: true });
   app.setGlobalPrefix('v1', { exclude: [{ path: 't/:id', method: RequestMethod.GET }] }); // short public share link
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true, forbidUnknownValues: false }));

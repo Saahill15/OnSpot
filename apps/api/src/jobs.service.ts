@@ -2,17 +2,47 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Prisma, Role } from '@prisma/client';
 import { createHmac, randomBytes, randomInt } from 'crypto';
+import { mkdir, writeFile } from 'fs/promises';
+import { join } from 'path';
 import {
-  ACTIVE_STATUSES, computeQuote, EVENTS, etaMinutes, isNightHour, isServiceCode, JobOffer, LatLng, PRICING, providerPayout, roadKm, ServiceCode, SERVICE_BY_CODE,
+  ACTIVE_STATUSES, computeQuote, EVENTS, etaMinutes, haversineKm, isNightHour, isServiceCode, JobOffer, LatLng, PRICING, providerPayout, roadKm, ServiceCode, SERVICE_BY_CODE,
 } from '@onspot/shared';
 import { config, GeoService, PrismaService, PushService, RealtimeService, SmsService } from './infra';
 import type { AuthUser } from './auth';
 
-const FULL = { events: { orderBy: { at: 'asc' } }, addons: { orderBy: { createdAt: 'asc' } }, messages: { orderBy: { at: 'asc' } }, payment: true, ratings: true, dispute: true, customer: true, provider: { include: { user: true } } } satisfies Prisma.JobInclude;
+const FULL = { events: { orderBy: { at: 'asc' } }, addons: { orderBy: { createdAt: 'asc' } }, messages: { orderBy: { at: 'asc' } }, payment: true, ratings: true, dispute: true, photos: { orderBy: { createdAt: 'asc' } }, customer: true, provider: { include: { user: true } } } satisfies Prisma.JobInclude;
 type FullJob = Prisma.JobGetPayload<{ include: typeof FULL }>;
 type Viewer = 'customer' | 'provider' | 'admin' | 'public';
 
 const mask = (p?: string | null) => (p ? `${p.slice(0, 2)}XXXXXX${p.slice(-2)}` : '');
+
+/** Hour of day in the service's time zone (servers usually run in UTC). */
+export function localHour(d = new Date()) {
+  return +new Intl.DateTimeFormat('en-GB', { hour: 'numeric', hourCycle: 'h23', timeZone: config.timeZone }).format(d);
+}
+
+/** Partner trust score, shown to customers. Needs a few arrivals before it means anything. */
+export function trustOf(p: { arrivals: number; onTimeArrivals: number; releases: number; overchargeRefunds: number; cleanStreak: number; jobsDone: number }) {
+  const onTimePct = p.arrivals >= 3 ? Math.round((p.onTimeArrivals / p.arrivals) * 100) : null;
+  const accepted = p.arrivals + p.releases;
+  const reliabilityPct = accepted >= 3 ? Math.round((p.arrivals / accepted) * 100) : null;
+  // 60% on time, 25% shows up after accepting, 15% no overcharging (each refunded overcharge costs 5 points).
+  const score = onTimePct == null || reliabilityPct == null ? null
+    : Math.round(0.6 * onTimePct + 0.25 * reliabilityPct + Math.max(0, 15 - 5 * p.overchargeRefunds));
+  return { score, onTimePct, reliabilityPct, cleanStreak: p.cleanStreak, overchargeRefunds: p.overchargeRefunds, jobsDone: p.jobsDone };
+}
+
+/** Photo links are signed and short-lived, so they work in <img> tags without exposing photos publicly. */
+export function photoUrl(photoId: string, ttlSec = 3600) {
+  const exp = Math.floor(Date.now() / 1000) + ttlSec;
+  const sig = createHmac('sha256', config.jwtSecret).update(`photo:${photoId}:${exp}`).digest('hex').slice(0, 32);
+  return `${config.publicUrl}/v1/photos/${photoId}?exp=${exp}&sig=${sig}`;
+}
+export function verifyPhotoSig(photoId: string, exp: number, sig: string) {
+  if (!exp || exp < Date.now() / 1000) return false;
+  const want = createHmac('sha256', config.jwtSecret).update(`photo:${photoId}:${exp}`).digest('hex').slice(0, 32);
+  return want === sig;
+}
 
 /** What each party may see. The start code never reaches the provider. */
 export function jobView(j: FullJob, viewer: Viewer) {
@@ -27,7 +57,9 @@ export function jobView(j: FullJob, viewer: Viewer) {
     startCode: viewer === 'customer' ? j.startCode : undefined,
     notes: viewer === 'public' ? undefined : j.notes, vehicle: j.vehicle,
     customer: { name: viewer === 'public' ? j.customer.name.split(' ')[0] : j.customer.name, phone: viewer === 'public' ? undefined : mask(j.customer.phone) },
-    provider: p && { id: p.userId, name: p.user.name, phone: viewer === 'public' ? undefined : mask(p.user.phone), rating: +p.rating.toFixed(2), ratingCount: p.ratingCount, vehicleNo: p.vehicleNo, verified: p.kycStatus === 'VERIFIED', lat: p.lat, lng: p.lng },
+    provider: p && { id: p.userId, name: p.user.name, phone: viewer === 'public' ? undefined : mask(p.user.phone), rating: +p.rating.toFixed(2), ratingCount: p.ratingCount, vehicleNo: p.vehicleNo, verified: p.kycStatus === 'VERIFIED', lat: p.lat, lng: p.lng, trust: trustOf(p) },
+    photos: viewer === 'public' ? undefined : j.photos.map(ph => ({ id: ph.id, kind: ph.kind, at: ph.createdAt, url: photoUrl(ph.id) })),
+    arrivedAuto: j.arrivedAuto,
     addons: j.addons.map(a => ({ id: a.id, label: a.label, amount: a.amount, reason: a.reason, status: a.status })),
     messages: viewer === 'public' ? undefined : j.messages.map(m => ({ id: m.id, from: m.from, text: m.text, at: m.at })),
     events: j.events.map(e => ({ text: e.text, at: e.at })),
@@ -113,7 +145,7 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
   async quote(u: AuthUser, body: { service: string; pickup: LatLng; drop?: LatLng | null; night?: boolean }) {
     if (!isServiceCode(body.service)) throw new BadRequestException('Unknown service');
     const near = await this.nearestAvailableKm(body.service, body.pickup);
-    const night = body.night ?? isNightHour(new Date().getHours());
+    const night = body.night ?? isNightHour(localHour());
     const q = computeQuote({ service: body.service, pickup: body.pickup, drop: body.service === 'tow' ? body.drop : null, approachKm: near.km ?? 4, night, shield: await this.shieldActive(u.sub) });
     return { quote: q, nearby: near.count };
   }
@@ -278,12 +310,58 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
     return j;
   }
 
+  /** Manual "I've arrived". Rejected when GPS says the partner is clearly elsewhere (stops fake arrivals). */
   async arrived(u: AuthUser, id: string) {
-    await this.mustBeProvider(u, id, ['ASSIGNED']);
-    await this.db.job.update({ where: { id }, data: { status: 'ARRIVED', arrivedAt: new Date(), eta: 0 } });
-    await this.event(id, 'Provider has arrived');
-    this.tellCustomer((await this.db.job.findUnique({ where: { id } }))!, 'Your pro has arrived', 'Share your 4-digit start code when they are with you.');
+    const j = await this.mustBeProvider(u, id, ['ASSIGNED']);
+    const p = j.provider!;
+    if (p.lat != null) {
+      const km = haversineKm(p as LatLng, { lat: j.pickupLat, lng: j.pickupLng });
+      if (km > config.arriveTapMaxKm) throw new ConflictException(`Your location shows you're ${km.toFixed(1)} km from the customer. Tap again once you're there.`);
+    }
+    await this.markArrived(id, false);
+    return jobView(await this.load(id), 'provider');
+  }
+
+  /** Shared by the manual tap and the geofence. Updates the partner's on-time record. */
+  private async markArrived(id: string, auto: boolean) {
+    const now = new Date();
+    const j = await this.db.job.findUnique({ where: { id } });
+    if (!j || j.status !== 'ASSIGNED') return;
+    const r = await this.db.job.updateMany({ where: { id, status: 'ASSIGNED' }, data: {
+      status: 'ARRIVED', arrivedAt: now, eta: 0, arrivedAuto: auto,
+    } });
+    if (!r.count) return;
+    const onTime = !j.promisedBy || now.getTime() <= j.promisedBy.getTime() + 2 * 60_000;
+    await this.db.provider.update({ where: { userId: j.providerId! }, data: { arrivals: { increment: 1 }, ...(onTime ? { onTimeArrivals: { increment: 1 } } : {}) } });
+    await this.event(id, auto ? 'Provider has arrived (location confirmed)' : 'Provider has arrived');
+    this.tellCustomer(j, 'Your pro has arrived', 'Share your 4-digit start code when they are with you.');
+    await this.broadcast(id);
+  }
+
+  // ------------------------------------------------------------ proof of work (photos)
+  async addPhoto(u: AuthUser, id: string, kind: 'BEFORE' | 'AFTER', dataBase64: string, mime: string) {
+    const j = await this.mustBeProvider(u, id, kind === 'BEFORE' ? ['ARRIVED', 'IN_PROGRESS'] : ['IN_PROGRESS', 'COMPLETED', 'PAID']);
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(mime)) throw new BadRequestException('Photo must be JPEG, PNG or WebP');
+    const buf = Buffer.from(dataBase64.replace(/^data:[^;]+;base64,/, ''), 'base64');
+    if (buf.length < 100 || buf.length > 5 * 1024 * 1024) throw new BadRequestException('Photo must be under 5 MB');
+    // Check the real file type, not just the declared one.
+    const isJpeg = buf[0] === 0xff && buf[1] === 0xd8, isPng = buf.subarray(0, 4).toString('hex') === '89504e47', isWebp = buf.subarray(8, 12).toString() === 'WEBP';
+    if (!(isJpeg || isPng || isWebp)) throw new BadRequestException('That file is not a photo');
+    if (j.photos.filter(p => p.kind === kind).length >= 3) throw new ConflictException(`You can add up to 3 ${kind.toLowerCase()} photos`);
+    const ext = isJpeg ? 'jpg' : isPng ? 'png' : 'webp';
+    const file = `${id}-${randomBytes(6).toString('hex')}.${ext}`;
+    await mkdir(config.uploadDir, { recursive: true });
+    await writeFile(join(config.uploadDir, file), buf);
+    await this.db.jobPhoto.create({ data: { jobId: id, kind, file, mime: isJpeg ? 'image/jpeg' : isPng ? 'image/png' : 'image/webp', bytes: buf.length } });
+    await this.event(id, `Partner added a ${kind === 'BEFORE' ? '"before"' : '"after"'} photo`);
     return jobView(await this.broadcast(id), 'provider');
+  }
+
+  /** For the signed photo link: returns the file to stream. */
+  async photoFile(photoId: string) {
+    const ph = await this.db.jobPhoto.findUnique({ where: { id: photoId } });
+    if (!ph) throw new NotFoundException('Photo not found');
+    return { path: join(config.uploadDir, ph.file), mime: ph.mime };
   }
 
   async start(u: AuthUser, id: string, code: string) {
@@ -324,7 +402,7 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
     const payout = providerPayout(finalAmount, j.platformFee);
     await this.db.$transaction([
       this.db.job.update({ where: { id }, data: { status: 'COMPLETED', completedAt: new Date(), finalAmount, providerPayout: payout } }),
-      this.db.provider.update({ where: { userId: u.sub }, data: { activeJobId: null, jobsDone: { increment: 1 }, earnings: { increment: payout } } }),
+      this.db.provider.update({ where: { userId: u.sub }, data: { activeJobId: null, jobsDone: { increment: 1 }, cleanStreak: { increment: 1 }, earnings: { increment: payout } } }),
       this.db.jobEvent.create({ data: { jobId: id, text: `Job completed · total ₹${finalAmount} (locked ₹${j.total}${finalAmount > j.total ? ` + approved extras ₹${finalAmount - j.total}` : ''})` } }),
     ]);
     await this.makeAvailable(u.sub);
@@ -405,6 +483,10 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
     if (refund < 0 || refund > max) throw new BadRequestException(`Refund must be between ₹0 and ₹${max}`);
     // Production: issue the refund through the gateway (Razorpay refunds API) and record its id.
     await this.db.dispute.update({ where: { id: disputeId }, data: { status: 'RESOLVED', resolution: resolution.slice(0, 500), refundAmount: refund, resolvedAt: new Date() } });
+    // A confirmed overcharge (refunded) hits the partner's trust score and resets their clean streak.
+    if (d.reason === 'OVERCHARGED' && refund > 0 && d.job.providerId) {
+      await this.db.provider.update({ where: { userId: d.job.providerId }, data: { overchargeRefunds: { increment: 1 }, cleanStreak: 0 } });
+    }
     await this.event(d.jobId, `Ops resolved the reported problem${refund ? ` · ₹${refund} refunded` : ''}`);
     this.tellCustomer(d.job, refund ? `₹${refund} refund approved` : 'Your report was reviewed', resolution.slice(0, 140));
     return jobView(await this.broadcast(d.jobId), 'admin');
@@ -504,7 +586,7 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
     await this.db.$transaction([
       // offeredIds is reset so partners who saw the first offer get notified again (declines are kept).
       this.db.job.update({ where: { id: j.id }, data: { status: 'SEARCHING', providerId: null, assignedAt: null, arrivedAt: null, eta: null, promisedBy: null, lateAt: null, radiusKm: 0, searchStartedAt: new Date(), offeredIds: [], declinedIds: { push: pid } } }),
-      this.db.provider.update({ where: { userId: pid }, data: { activeJobId: null } }),
+      this.db.provider.update({ where: { userId: pid }, data: { activeJobId: null, releases: { increment: 1 } } }), // counts against reliability
       this.db.jobEvent.create({ data: { jobId: j.id, text: eventText } }),
     ]);
     this.offerAt.delete(j.id);
@@ -549,6 +631,11 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
     if (!p.activeJobId) { await this.makeAvailable(providerId); return { ok: true }; }
     const j = await this.db.job.findUnique({ where: { id: p.activeJobId } });
     if (j?.status === 'ASSIGNED') {
+      // Geofence: close enough to the customer → mark arrived automatically (no tap needed, no fake taps).
+      if (haversineKm(at, { lat: j.pickupLat, lng: j.pickupLng }) * 1000 <= config.arriveRadiusM) {
+        await this.markArrived(j.id, true);
+        return { ok: true, arrived: true };
+      }
       const eta = etaMinutes(roadKm(at, { lat: j.pickupLat, lng: j.pickupLng }));
       if (eta !== j.eta) await this.db.job.update({ where: { id: j.id }, data: { eta } });
       const payload = { jobId: j.id, providerId, lat: at.lat, lng: at.lng, eta };

@@ -10,7 +10,16 @@ export const C = {
   warn: '#B35C00', warnSoft: '#FFF6EC', danger: '#C13515', dangerSoft: '#FFF2EF',
 };
 export const rupee = (n?: number | null) => '₹' + Math.round(n || 0).toLocaleString('en-IN');
-export const hhmm = (d: string | Date) => new Date(d).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+// All times are shown in IST, whatever the phone's own time zone. India has no daylight saving, so IST is
+// always UTC+5:30; computing it directly avoids relying on each device's Intl time-zone support.
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const ist = (d: string | Date) => new Date(new Date(d).getTime() + 330 * 60_000); // read with getUTC*()
+/** "9:05 PM" in IST */
+export const hhmm = (d: string | Date) => { const t = ist(d), h = t.getUTCHours(); return `${h % 12 || 12}:${String(t.getUTCMinutes()).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`; };
+/** "27 Nov" in IST */
+export const dayMonth = (d: string | Date) => { const t = ist(d); return `${t.getUTCDate()} ${MONTHS[t.getUTCMonth()]}`; };
+/** "27 Nov 2026" in IST */
+export const fullDate = (d: string | Date) => { const t = ist(d); return `${t.getUTCDate()} ${MONTHS[t.getUTCMonth()]} ${t.getUTCFullYear()}`; };
 export const initials = (n = '?') => n.split(' ').map(x => x[0]).slice(0, 2).join('').toUpperCase();
 
 export const SERVICE_ICON: Record<ServiceCode, keyof typeof Feather.glyphMap> = {
@@ -95,3 +104,35 @@ export const st = StyleSheet.create({
 /** Pins a screen's main action to the bottom of the screen when content is short (scroll area must use flexGrow: 1). */
 export const BottomCTA = ({ children, style }: { children: React.ReactNode; style?: ViewStyle }) =>
   <View style={[{ marginTop: 'auto', paddingTop: 16 }, style]}>{children}</View>;
+
+/** Settings-style grouped list (iOS / Airbnb account page): a small heading over a bordered card of rows. */
+export const ListGroup = ({ title, children }: { title?: string; children: React.ReactNode }) => (
+  <View style={{ marginBottom: 20 }}>
+    {!!title && <T s="label" style={{ marginBottom: 8, marginLeft: 4 }}>{title}</T>}
+    <View style={{ borderWidth: 1, borderColor: C.line, borderRadius: 16, overflow: 'hidden', backgroundColor: '#fff' }}>
+      {React.Children.toArray(children).filter(Boolean).map((c, i) => <View key={i} style={i ? { borderTopWidth: 1, borderTopColor: C.line } : undefined}>{c}</View>)}
+    </View>
+  </View>
+);
+
+export const ListRow = ({ icon, title, value, onPress, danger }: { icon: IconName; title: string; value?: string; onPress: () => void; danger?: boolean }) => (
+  <Pressable onPress={onPress} accessibilityRole="button" style={({ pressed }) => ({ flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 14, backgroundColor: pressed ? C.surface2 : '#fff' })}>
+    <Icon name={icon} size={19} color={danger ? C.danger : C.ink} />
+    <View style={{ flex: 1 }}>
+      <T s="body" style={{ color: danger ? C.danger : C.ink, fontWeight: '500' }}>{title}</T>
+      {!!value && <T s="xs" numberOfLines={1}>{value}</T>}
+    </View>
+    {!danger && <Icon name="chevron-right" size={18} color={C.muted} />}
+  </Pressable>
+);
+
+/** Header for a sub-page opened from a list row: back chevron + title. */
+export const SubHeader = ({ title, sub, onBack }: { title: string; sub?: string; onBack: () => void }) => (
+  <View style={{ marginBottom: 18 }}>
+    <Pressable onPress={onBack} accessibilityLabel="Back" hitSlop={10} style={{ width: 36, height: 36, borderRadius: 18, borderWidth: 1, borderColor: C.line2, alignItems: 'center', justifyContent: 'center', marginBottom: 14 }}>
+      <Icon name="chevron-left" size={20} />
+    </Pressable>
+    <T s="h1" style={{ fontSize: 26 }}>{title}</T>
+    {!!sub && <T s="sm" style={{ color: C.muted, marginTop: 4 }}>{sub}</T>}
+  </View>
+);

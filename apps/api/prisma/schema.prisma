@@ -89,6 +89,12 @@ model Provider {
   kycStatus   KycStatus @default(PENDING)
   kycDocs     Json?
   suspended   Boolean   @default(false) // set by ops; blocks going online
+  // Trust score inputs, updated as jobs happen (shown to customers once there's enough history).
+  arrivals          Int @default(0) // jobs where the partner reached the customer
+  onTimeArrivals    Int @default(0) // ...by the time they promised (+2 min grace)
+  releases          Int @default(0) // jobs accepted then given back
+  overchargeRefunds Int @default(0) // disputes for overcharging that ops refunded
+  cleanStreak       Int @default(0) // completed jobs since the last overcharge refund
   earnings    Int       @default(0)
   jobsDone    Int       @default(0)
   // One active job per provider, enforced by the database.
@@ -129,7 +135,9 @@ model Job {
   minRating       Float? // "top-rated pros only": dispatch only to verified pros at/above this rating
   promisedBy      DateTime? // when the partner said they'd arrive (assignedAt + ETA); drives the late-arrival guard
   lateAt          DateTime? // set when the partner is well past promisedBy
+  arrivedAuto     Boolean    @default(false) // arrival detected by geofence, not tapped
   dispute         Dispute?
+  photos          JobPhoto[]
   createdAt       DateTime   @default(now())
   searchStartedAt DateTime   @default(now())
   assignedAt      DateTime?
@@ -192,6 +200,25 @@ model Payment {
   ref            String
   gatewayOrderId String?
   createdAt      DateTime @default(now())
+}
+
+enum PhotoKind {
+  BEFORE
+  AFTER
+}
+
+/// Proof of work: partner photos at the start and end of a job. Files live in UPLOAD_DIR (S3 in production).
+model JobPhoto {
+  id        String    @id @default(cuid())
+  jobId     String
+  job       Job       @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  kind      PhotoKind
+  file      String // file name inside UPLOAD_DIR
+  mime      String
+  bytes     Int
+  createdAt DateTime  @default(now())
+
+  @@index([jobId])
 }
 
 enum DisputeReason {

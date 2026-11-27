@@ -4,13 +4,14 @@ import { Linking, Platform, Pressable, ScrollView, View, useWindowDimensions } f
 import * as Location from 'expo-location';
 import { EVENTS, JobOffer, LatLng, SERVICES, ServiceCode, SERVICE_BY_CODE } from '@onspot/shared';
 import { api, getSocket } from './api';
-import { act, ACTIVE, ChatPanel, confirm, JobView, Stars, toast } from './common';
+import { act, ACTIVE, ChatPanel, confirm, JobView, PhotoStrip, Stars, toast, Trust } from './common';
+import { takeJobPhoto } from './photos';
 import { hasBackgroundPermission, startBackgroundLocation, stopBackgroundLocation } from './backgroundLocation';
 import Map from './Map';
 import type { MapMarker } from './mapTypes';
-import { Avatar, BottomCTA, Button, C, Card, Divider, hhmm, Icon, IconCircle, Input, Pill, Row, rupee, SERVICE_ICON, T } from './ui';
+import { Avatar, BottomCTA, Button, C, Card, dayMonth, Divider, hhmm, Icon, IconCircle, Input, ListGroup, ListRow, Pill, Row, rupee, SERVICE_ICON, SubHeader, T } from './ui';
 
-interface Me { id: string; name: string; services: ServiceCode[]; vehicleNo: string; online: boolean; lat: number | null; lng: number | null; rating: number; ratingCount: number; kycStatus: 'PENDING' | 'SUBMITTED' | 'VERIFIED' | 'REJECTED'; earnings: number; jobsDone: number; activeJobId: string | null }
+interface Me { id: string; name: string; services: ServiceCode[]; vehicleNo: string; online: boolean; lat: number | null; lng: number | null; rating: number; ratingCount: number; kycStatus: 'PENDING' | 'SUBMITTED' | 'VERIFIED' | 'REJECTED'; earnings: number; jobsDone: number; activeJobId: string | null; trust?: Trust }
 type Offer = Omit<JobOffer, 'expiresAt'> & { expiresAt?: string; receivedAt: number; ttl: number }; // ttl: seconds left when received (server clock)
 const OFFER_SEC = 20;
 const DEMO = { lat: 18.7546, lng: 73.4062 };
@@ -172,40 +173,98 @@ function OfferCard({ o, now, onAccept, onDecline }: { o: Offer; now: number; onA
   );
 }
 
+function JobLine({ j }: { j: JobView }) {
+  return (
+    <Row gap={12} style={{ paddingHorizontal: 16, paddingVertical: 12 }}>
+      <IconCircle name={SERVICE_ICON[j.service]} size={36} />
+      <View style={{ flex: 1 }}><T s="sm" style={{ fontWeight: '600' }}>{j.customer.name}</T><T s="xs">{SERVICE_BY_CODE[j.service].name} · {dayMonth(j.completedAt || j.createdAt)}, {hhmm(j.completedAt || j.createdAt)}{j.ratings.CUSTOMER ? ` · ★ ${j.ratings.CUSTOMER.stars}` : ''}{j.tip ? ` · ${rupee(j.tip)} tip` : ''}</T></View>
+      <T s="h3" style={{ fontSize: 14 }}>{rupee((j.providerPayout || 0) + (j.tip || 0))}</T>
+    </Row>
+  );
+}
+
 function Dashboard({ me, setMe, history, onToggle, onSignOut }: { me: Me; setMe: (m: Me) => void; history: JobView[]; onToggle: () => void; onSignOut: () => void }) {
+  const [page, setPage] = useState<'home' | 'trust' | 'hotspots' | 'jobs' | 'services' | 'vehicle'>('home');
   const [vehicleNo, setVehicleNo] = useState(me.vehicleNo);
-  const today = new Date().toDateString();
-  const todays = history.filter(j => new Date(j.completedAt || j.createdAt).toDateString() === today);
-  const patch = (body: object) => act(() => api<Me>('/provider/me', { method: 'PATCH', body })).then(r => r && setMe({ ...me, ...r }));
+  const today = dayMonth(new Date());
+  const todays = history.filter(j => dayMonth(j.completedAt || j.createdAt) === today);
+  const patch = (body: object, msg?: string) => act(() => api<Me>('/provider/me', { method: 'PATCH', body })).then(r => { if (r) { setMe({ ...me, ...r }); if (msg) toast(msg, 'ok'); } return r; });
+  const home = () => setPage('home');
+  const t = me.trust;
+
+  if (page === 'trust') return <><SubHeader title="Trust score" sub="How reliable customers can expect you to be." onBack={home} /><TrustCard t={t} /></>;
+  if (page === 'hotspots') return <><SubHeader title="Where jobs happen" sub="Requests for your services nearby, last 30 days." onBack={home} /><Hotspots services={me.services.join(',')} /></>;
+  if (page === 'jobs') return <><SubHeader title="Job history" sub={`${history.length} jobs · ${rupee(me.earnings)} earned in all`} onBack={home} />
+    {history.length ? <ListGroup>{history.map(j => <JobLine key={j.id} j={j} />)}</ListGroup> : <Card soft><T s="sm" style={{ color: C.muted, textAlign: 'center' }}>Your completed jobs and payouts will show here.</T></Card>}</>;
+  if (page === 'services') return <><SubHeader title="Services I offer" sub="You only get requests for the services you pick." onBack={home} />
+    <ListGroup>{SERVICES.map(sv => { const on = me.services.includes(sv.code); return (
+      <Pressable key={sv.code} onPress={() => patch({ services: on ? me.services.filter(x => x !== sv.code) : [...me.services, sv.code] })} accessibilityRole="checkbox" accessibilityState={{ checked: on }}
+        style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 13 }}>
+        <Icon name={SERVICE_ICON[sv.code]} size={19} /><T s="body" style={{ flex: 1, fontWeight: '500' }}>{sv.name}</T>
+        <View style={{ width: 22, height: 22, borderRadius: 6, borderWidth: on ? 0 : 1.5, borderColor: C.line2, backgroundColor: on ? C.ink : '#fff', alignItems: 'center', justifyContent: 'center' }}>{on && <Icon name="check" size={14} color="#fff" />}</View>
+      </Pressable>); })}</ListGroup></>;
+  if (page === 'vehicle') return <><SubHeader title="Vehicle or shop" sub="Customers see this number on your card so they can recognise you." onBack={home} />
+    <Input label="Vehicle number" value={vehicleNo} onChangeText={x => setVehicleNo(x.toUpperCase())} placeholder="MH 12 AB 1234" autoCapitalize="characters" />
+    <BottomCTA><Button kind="dark" title="Save" disabled={!vehicleNo.trim() || vehicleNo === me.vehicleNo} onPress={() => patch({ vehicleNo }, 'Vehicle saved').then(r => { if (r) home(); })} /></BottomCTA></>;
+
   return (
     <>
       <View style={{ backgroundColor: C.ink, borderRadius: 20, padding: 20, marginBottom: 14 }}>
         <T s="label" style={{ color: 'rgba(255,255,255,.7)' }}>Today's earnings</T>
-        <T s="h1" style={{ color: '#fff', fontSize: 40, marginBottom: 14 }}>{rupee(todays.reduce((t, j) => t + (j.providerPayout || 0) + (j.tip || 0), 0))}</T>
+        <T s="h1" style={{ color: '#fff', fontSize: 40, marginBottom: 14 }}>{rupee(todays.reduce((x, j) => x + (j.providerPayout || 0) + (j.tip || 0), 0))}</T>
         <Row gap={0} style={{ borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,.15)', paddingTop: 14 }}>
-          {[[String(todays.length), 'jobs today'], [`★ ${me.rating.toFixed(1)}`, 'rating'], [rupee(me.earnings), 'all time']].map(([b, l]) => <View key={l} style={{ flex: 1 }}><T s="h3" style={{ color: '#fff' }}>{b}</T><T s="xs" style={{ color: 'rgba(255,255,255,.65)' }}>{l}</T></View>)}
+          {[[String(todays.length), 'jobs today'], [`★ ${me.rating.toFixed(1)}`, 'rating'], [rupee(me.earnings), 'all time']].map(([v, l]) => <View key={l} style={{ flex: 1 }}><T s="h3" style={{ color: '#fff' }}>{v}</T><T s="xs" style={{ color: 'rgba(255,255,255,.65)' }}>{l}</T></View>)}
         </Row>
       </View>
-      <Pressable onPress={onToggle} style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, padding: 16, borderRadius: 14, backgroundColor: me.online ? C.okSoft : C.accent, marginBottom: 14 }}>
+      <Pressable onPress={onToggle} style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, padding: 16, borderRadius: 14, backgroundColor: me.online ? C.okSoft : C.accent, marginBottom: 20 }}>
         <View style={{ width: 9, height: 9, borderRadius: 5, backgroundColor: me.online ? C.ok : '#fff' }} />
         <T s="h3" style={{ color: me.online ? C.ok : '#fff' }}>{me.online ? "You're online · tap to go offline" : 'Go online'}</T>
       </Pressable>
       {me.kycStatus !== 'VERIFIED' && <Kyc me={me} setMe={setMe} />}
-      {me.kycStatus === 'VERIFIED' && <Hotspots services={me.services.join(',')} />}
-      <T s="h3" style={{ fontSize: 18, marginTop: 12, marginBottom: 10 }}>Recent jobs</T>
-      {history.length ? history.slice(0, 5).map(j => <Row key={j.id} gap={12} style={{ paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.line }}>
-        <IconCircle name={SERVICE_ICON[j.service]} size={36} /><View style={{ flex: 1 }}><T s="sm" style={{ fontWeight: '600' }}>{j.customer.name}</T><T s="xs">{SERVICE_BY_CODE[j.service].name} · {hhmm(j.completedAt || j.createdAt)}{j.ratings.CUSTOMER ? ` · ★ ${j.ratings.CUSTOMER.stars}` : ''}{j.tip ? ` · ${rupee(j.tip)} tip` : ''}</T></View><T s="h3" style={{ fontSize: 14 }}>{rupee((j.providerPayout || 0) + (j.tip || 0))}</T>
-      </Row>) : <Card soft><T s="sm" style={{ color: C.muted, textAlign: 'center' }}>Your completed jobs and payouts will show here.</T></Card>}
-      <T s="h3" style={{ fontSize: 18, marginTop: 22, marginBottom: 10 }}>Services I offer</T>
-      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-        {SERVICES.map(s => { const on = me.services.includes(s.code); return <Pressable key={s.code} onPress={() => patch({ services: on ? me.services.filter(x => x !== s.code) : [...me.services, s.code] })}
-          style={{ paddingHorizontal: 14, paddingVertical: 8, borderRadius: 99, borderWidth: 1, borderColor: on ? C.ink : C.line2, backgroundColor: on ? C.ink : '#fff' }}><T s="sm" style={{ color: on ? '#fff' : C.ink }}>{s.name}</T></Pressable>; })}
-      </View>
-      <T s="h3" style={{ fontSize: 18, marginTop: 22, marginBottom: 10 }}>Vehicle or shop</T>
-      <Input value={vehicleNo} onChangeText={t => setVehicleNo(t.toUpperCase())} onEndEditing={() => patch({ vehicleNo })} onBlur={() => vehicleNo !== me.vehicleNo && patch({ vehicleNo })} placeholder="Vehicle number, e.g. MH 12 AB 1234" />
-      <Divider />
-      <Button kind="danger" title="Sign out" onPress={onSignOut} />
+      {me.kycStatus === 'VERIFIED' && <ListGroup title="Performance">
+        <ListRow icon="shield" title="Trust score" value={t?.score == null ? 'New · shows after 3 arrivals' : `${t.score} · ${t.onTimePct}% on time`} onPress={() => setPage('trust')} />
+        <ListRow icon="trending-up" title="Where jobs happen" value="Busiest places and hours near you" onPress={() => setPage('hotspots')} />
+      </ListGroup>}
+      <ListGroup title="Recent jobs">
+        {history.length ? history.slice(0, 3).map(j => <JobLine key={j.id} j={j} />) : <T s="sm" style={{ color: C.muted, textAlign: 'center', padding: 16 }}>Your completed jobs and payouts will show here.</T>}
+        {history.length > 3 && <ListRow icon="list" title="See all jobs" value={`${history.length} jobs`} onPress={() => setPage('jobs')} />}
+      </ListGroup>
+      <ListGroup title="Settings">
+        <ListRow icon="tool" title="Services I offer" value={me.services.length ? me.services.map(c => SERVICE_BY_CODE[c].name).join(', ') : 'None selected'} onPress={() => setPage('services')} />
+        <ListRow icon="truck" title="Vehicle or shop" value={me.vehicleNo || 'Add your vehicle number'} onPress={() => setPage('vehicle')} />
+      </ListGroup>
+      <ListGroup>
+        <ListRow icon="log-out" title="Sign out" danger onPress={async () => { if (await confirm('Sign out?', 'You will go offline and stop getting jobs.', 'Sign out', true)) onSignOut(); }} />
+      </ListGroup>
     </>
+  );
+}
+
+/** The partner's own trust score with what feeds it, so they know how to raise it. Customers see the score on the pro card. */
+function TrustCard({ t }: { t?: Trust }) {
+  if (!t) return null;
+  const rows: [string, string][] = [['On time', t.onTimePct == null ? '—' : `${t.onTimePct}%`], ['Kept jobs', t.reliabilityPct == null ? '—' : `${t.reliabilityPct}%`], ['Clean streak', String(t.cleanStreak)]];
+  return (
+    <Card>
+      <Row style={{ marginBottom: 4 }}><Icon name="shield" size={18} /><T s="h3" style={{ flex: 1 }}>Trust score</T><T s="h3" style={{ color: t.score == null ? C.muted : t.score >= 85 ? C.ok : t.score >= 70 ? C.warn : C.ink }}>{t.score ?? 'New'}</T></Row>
+      <T s="xs" style={{ marginBottom: 12 }}>{t.score == null ? 'Shows to customers after your first 3 arrivals.' : 'Customers see this on your card. Arrive on time, keep the jobs you accept, and bill only the locked fare.'}</T>
+      <Row gap={0}>{rows.map(([l, v]) => <View key={l} style={{ flex: 1 }}><T s="h3" style={{ fontSize: 16 }}>{v}</T><T s="xs">{l}</T></View>)}</Row>
+      {t.overchargeRefunds > 0 && <T s="xs" style={{ color: C.danger, marginTop: 10 }}>{t.overchargeRefunds} overcharge refund{t.overchargeRefunds > 1 ? 's' : ''} lowered your score.</T>}
+    </Card>
+  );
+}
+
+/** Before/after photo buttons + thumbnails. Photos protect the partner in disputes and reassure the customer. */
+function ProofPhotos({ job, setJob, kinds }: { job: JobView; setJob: (j: JobView) => void; kinds: ('BEFORE' | 'AFTER')[] }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const count = (k: string) => (job.photos || []).filter(p => p.kind === k).length;
+  const take = async (k: 'BEFORE' | 'AFTER') => { setBusy(k); const r = await act(() => takeJobPhoto(job.id, k)); setBusy(null); if (r) { setJob(r); toast('Photo added', 'ok'); } };
+  return (
+    <View style={{ marginBottom: 12 }}>
+      <Row gap={8}>{kinds.map(k => <Button key={k} small kind="outline" icon="camera" loading={busy === k} disabled={count(k) >= 3} style={{ flex: 1 }}
+        title={`${k === 'BEFORE' ? 'Before' : 'After'} photo${count(k) ? ` (${count(k)}/3)` : ''}`} onPress={() => take(k)} />)}</Row>
+      <PhotoStrip photos={job.photos} title="Your photos" by="" />
+    </View>
   );
 }
 
@@ -257,6 +316,8 @@ function JobPanel({ job, setJob, onSimulate, onDone }: { job: JobView; setJob: (
   const [code, setCode] = useState('');
   const [addon, setAddon] = useState<{ label: string; amount: string; reason: string } | null>(null);
   const [stars, setStars] = useState(5);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [seen, setSeen] = useState(job.messages?.length || 0);
   const call = (path: string, body: object = {}) => act(() => api<JobView>(`/jobs/${job.id}/${path}`, { body })).then(r => { if (r && (r as any).id) setJob(r); return r; });
   const pending = job.addons.some(a => a.status === 'PENDING');
   const head = (
@@ -266,7 +327,11 @@ function JobPanel({ job, setJob, onSimulate, onDone }: { job: JobView; setJob: (
       <Pressable onPress={() => Linking.openURL('tel:0000000000')} accessibilityLabel="Call customer"><IconCircle name="phone" size={40} /></Pressable>
     </Row>
   );
-  const chat = ACTIVE.includes(job.status) && <ChatPanel job={job} me="PROVIDER" onSend={t => api(`/jobs/${job.id}/messages`, { body: { text: t } }).then(setJob)} />;
+  const msgs = job.messages?.length || 0;
+  const unread = msgs - seen;
+  const chat = ACTIVE.includes(job.status) && <View style={{ marginTop: 14 }}>{chatOpen
+    ? <ChatPanel job={job} me="PROVIDER" onSend={t => api(`/jobs/${job.id}/messages`, { body: { text: t } }).then(setJob)} />
+    : <ListGroup><ListRow icon="message-circle" title={unread > 0 ? `Messages · ${unread} new` : 'Message customer'} value={msgs ? job.messages![msgs - 1].text : 'Numbers stay private'} onPress={() => { setChatOpen(true); setSeen(msgs); }} /></ListGroup>}</View>;
   if (job.status === 'ASSIGNED') return <>{head}
     <Row style={{ marginBottom: 12 }}><T s="h2" style={{ flex: 1 }}>Head to customer</T><T s="h3" style={{ color: C.accent }}>{job.eta ?? '—'} min</T></Row>
     {job.late && <Card style={{ backgroundColor: C.warnSoft, borderColor: 'transparent' }}><Row style={{ alignItems: 'flex-start' }}><Icon name="clock" size={18} color={C.warn} /><T s="sm" style={{ flex: 1 }}><T s="sm" style={{ fontWeight: '600' }}>You're past your promised arrival time.</T> The customer can now switch to another pro for free. Message them with an update.</T></Row></Card>}
@@ -274,16 +339,19 @@ function JobPanel({ job, setJob, onSimulate, onDone }: { job: JobView; setJob: (
     <View style={{ gap: 10 }}>
       <Button kind="dark" icon="navigation" title="Navigate in Google Maps" onPress={() => Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${job.pickup.lat},${job.pickup.lng}`)} />
       {__DEV__ && <Button kind="outline" title="Simulate drive (dev)" onPress={onSimulate} />}
+      <Row style={{ alignItems: 'flex-start' }}><Icon name="map-pin" size={14} color={C.muted} /><T s="xs" style={{ flex: 1 }}>We mark you arrived automatically when you're within 150 m of the customer.</T></Row>
       <Button title="I've arrived" onPress={() => call('arrived')} />
-      <Button kind="ghost" title="Can't make it? Release job" onPress={async () => { if (await confirm('Release this job?', 'It will go to another provider. Frequent releases lower your score.', 'Release')) { await call('cancel'); onDone(); } }} />
+      <Button kind="ghost" title="Can't make it? Release job" onPress={async () => { if (await confirm('Release this job?', 'It will go to another provider. Frequent releases lower your score.', 'Release', true)) { await call('cancel'); onDone(); } }} />
     </View>{chat}</>;
   if (job.status === 'ARRIVED') return <>{head}
     <T s="h2">Ask for the 4-digit start code</T>
     <T s="sm" style={{ color: C.muted, marginVertical: 8 }}>The job starts only once you enter the code shown in the customer's app.</T>
+    <ProofPhotos job={job} setJob={setJob} kinds={['BEFORE']} />
     <Input value={code} onChangeText={t => setCode(t.replace(/\D/g, '').slice(0, 4))} keyboardType="number-pad" placeholder="• • • •" style={{ fontSize: 28, textAlign: 'center', letterSpacing: 12, fontWeight: '700' }} />
     <Button title="Verify and start" disabled={code.length !== 4} onPress={() => call('start', { code })} />{chat}</>;
   if (job.status === 'IN_PROGRESS') return <>{head}
     <Row style={{ marginBottom: 12 }}><T s="h2" style={{ flex: 1 }}>Job in progress</T><Pill text={`since ${hhmm(job.startedAt!)}`} /></Row>
+    <ProofPhotos job={job} setJob={setJob} kinds={['BEFORE', 'AFTER']} />
     {job.addons.length > 0 && <Card>{job.addons.map(a => <Row key={a.id} style={{ justifyContent: 'space-between', paddingVertical: 4 }}><T s="sm" style={{ flex: 1 }}>{a.label}</T><Pill tone={a.status === 'APPROVED' ? 'ok' : a.status === 'REJECTED' ? 'gray' : 'warn'} text={a.status.toLowerCase()} /><T s="sm" style={{ width: 60, textAlign: 'right' }}>{rupee(a.amount)}</T></Row>)}</Card>}
     <Card soft>
       <Row><View style={{ flex: 1 }}><T s="sm" style={{ fontWeight: '600' }}>Parts, tolls or extra work?</T><T s="xs">The customer approves in their app before it's billed.</T></View><Button small kind="outline" title={addon ? 'Close' : 'Add item'} onPress={() => setAddon(addon ? null : { label: '', amount: '', reason: '' })} /></Row>
@@ -294,7 +362,7 @@ function JobPanel({ job, setJob, onSimulate, onDone }: { job: JobView; setJob: (
         <Button kind="dark" title="Send for approval" disabled={!addon.label || !addon.amount} onPress={() => call('addons', { label: addon.label, amount: +addon.amount, reason: addon.reason }).then(r => { if (r) { setAddon(null); toast('Sent to the customer for approval'); } })} />
       </View>}
     </Card>
-    <Button kind="dark" title={pending ? 'Waiting for customer approval…' : 'Mark job complete'} disabled={pending} onPress={() => call('complete')} />{chat}</>;
+    <Button kind="dark" title={pending ? 'Waiting for customer approval…' : 'Mark job complete'} disabled={pending} onPress={async () => { if (!(job.photos || []).some(p => p.kind === 'AFTER') && !(await confirm('Complete without an after photo?', 'An after photo protects you if the customer reports a problem later.', 'Complete anyway'))) return; await call('complete'); }} />{chat}</>;
   if (job.status === 'COMPLETED' && job.payment?.status === 'PENDING_CASH') return <>{head}
     <View style={{ alignSelf: 'center' }}><IconCircle name="dollar-sign" size={64} bg={C.warnSoft} color={C.warn} /></View>
     <T s="h2" style={{ textAlign: 'center', marginTop: 12 }}>Collect {rupee(job.finalAmount)} in cash</T>

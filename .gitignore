@@ -14,3 +14,6 @@ prototype/data.json
 *.log
 .DS_Store
 Thumbs.db
+
+# proof-of-work photos stored locally in development
+apps/api/uploads/

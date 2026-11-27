@@ -7,7 +7,7 @@ import { PrismaClient } from '@prisma/client';
 import { EVENTS } from '@onspot/shared';
 import { createApp } from '../src/main';
 import { config, PushService } from '../src/infra';
-import { JobsService } from '../src/jobs.service';
+import { JobsService, localHour } from '../src/jobs.service';
 
 let app: INestApplication;
 let base: string;
@@ -40,7 +40,7 @@ async function makeProvider(phone: string, name: string, services: string[], at 
   await http().patch('/v1/provider/me').set(auth(p.token)).send({ services, vehicleNo: 'mh 12 ab 1234' }).expect(200);
   await http().post('/v1/provider/kyc').set(auth(p.token)).send({ idType: 'AADHAAR', idLast4: '1234', dlNumber: 'MH1220190001', upiId: 'test@okbank' }).expect(200);
   await http().post(`/v1/admin/providers/${p.id}/kyc`).set(auth(admin!)).send({ approve: true }).expect(200);
-  await http().post('/v1/provider/status').set(auth(p.token)).send({ online: true, lat: at.lat + 0.005, lng: at.lng + 0.005 }).expect(200);
+  await http().post('/v1/provider/status').set(auth(p.token)).send({ online: true, lat: at.lat + 0.002, lng: at.lng + 0.002 }).expect(200);
   return p;
 }
 
@@ -435,5 +435,92 @@ describe('family tracking page', () => {
     await db.job.update({ where: { id: done!.id }, data: { paidAt: new Date(Date.now() - 3 * 3600_000) } });
     await http().get(`/v1/track/${done!.id}`).expect(410);
     await http().get('/v1/track/does-not-exist').expect(404);
+  });
+});
+
+describe('proof of work, automatic arrival, trust score, IST', () => {
+  // Hyderabad, far from the other suites' partners.
+  const SPOT = { lat: 17.385, lng: 78.4867, label: 'Banjara Hills Rd 12' };
+  let admin: string, cust: { token: string; id: string }, pro: { token: string; id: string };
+  // Smallest valid JPEG-looking payload: JPEG magic bytes + padding (the API checks real file type, not the mime).
+  const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(300, 7), Buffer.from([0xff, 0xd9])]).toString('base64');
+
+  beforeAll(async () => {
+    admin = (await login('9999999999', 'ADMIN')).token;
+    cust = await login('9876500088', 'CUSTOMER', 'Kavya Rao');
+    pro = await makeProvider('9800000088', 'Vikram Singh', ['battery'], SPOT, admin);
+  });
+  const newJob = async () => {
+    const j = (await http().post('/v1/jobs').set(auth(cust.token)).send({ service: 'battery', pickup: SPOT, night: false }).expect(201)).body;
+    await http().post(`/v1/jobs/${j.id}/accept`).set(auth(pro.token)).expect(200);
+    return j.id as string;
+  };
+
+  it('rejects "arrived" taps from far away and auto-arrives inside the geofence', async () => {
+    const id = await newJob();
+    await http().post('/v1/provider/location').set(auth(pro.token)).send({ lat: SPOT.lat + 0.02, lng: SPOT.lng }).expect(200); // ~2.2 km away
+    const far = await http().post(`/v1/jobs/${id}/arrived`).set(auth(pro.token)).expect(409);
+    expect(far.body.message).toMatch(/km from the customer/);
+    const r = await http().post('/v1/provider/location').set(auth(pro.token)).send({ lat: SPOT.lat + 0.0005, lng: SPOT.lng }).expect(200); // ~55 m
+    expect(r.body.arrived).toBe(true);
+    const j = (await http().get(`/v1/jobs/${id}`).set(auth(cust.token))).body;
+    expect(j.status).toBe('ARRIVED');
+    expect(j.arrivedAuto).toBe(true);
+    expect(j.events.some((e: any) => e.text.includes('location confirmed'))).toBe(true);
+    await http().post(`/v1/jobs/${id}/cancel`).set(auth(cust.token)).send({}).expect(200);
+  });
+
+  it('stores before/after photos, shows them to the customer via signed links, and hides them publicly', async () => {
+    const id = await newJob();
+    await http().post('/v1/provider/location').set(auth(pro.token)).send({ lat: SPOT.lat, lng: SPOT.lng }).expect(200); // arrives
+    await http().post(`/v1/jobs/${id}/photos`).set(auth(pro.token)).send({ kind: 'AFTER', mime: 'image/jpeg', data: jpeg }).expect(409); // not started yet
+    await http().post(`/v1/jobs/${id}/photos`).set(auth(pro.token)).send({ kind: 'BEFORE', mime: 'image/jpeg', data: Buffer.from('x'.repeat(300)).toString('base64') }).expect(400); // not an image
+    await http().post(`/v1/jobs/${id}/photos`).set(auth(cust.token)).send({ kind: 'BEFORE', mime: 'image/jpeg', data: jpeg }).expect(403);
+    await http().post(`/v1/jobs/${id}/photos`).set(auth(pro.token)).send({ kind: 'BEFORE', mime: 'image/jpeg', data: jpeg }).expect(200);
+    const code = (await http().get(`/v1/jobs/${id}`).set(auth(cust.token))).body.startCode;
+    await http().post(`/v1/jobs/${id}/start`).set(auth(pro.token)).send({ code }).expect(200);
+    await http().post(`/v1/jobs/${id}/photos`).set(auth(pro.token)).send({ kind: 'AFTER', mime: 'image/jpeg', data: jpeg }).expect(200);
+    const j = (await http().get(`/v1/jobs/${id}`).set(auth(cust.token))).body;
+    expect(j.photos.map((p: any) => p.kind)).toEqual(['BEFORE', 'AFTER']);
+    const path = new URL(j.photos[0].url).pathname + new URL(j.photos[0].url).search;
+    const img = await http().get(path).expect(200);
+    expect(img.headers['content-type']).toBe('image/jpeg');
+    await http().get(path.replace(/sig=[0-9a-f]+/, 'sig=' + '0'.repeat(32))).expect(403); // tampered link
+    expect((await http().get(`/v1/track/${id}`)).body.photos).toBeUndefined(); // not on the family page
+    await http().post(`/v1/jobs/${id}/complete`).set(auth(pro.token)).expect(200);
+  });
+
+  it('builds a trust score from on-time arrivals, releases and refunded overcharges', async () => {
+    // Two more on-time arrivals → enough history for a score.
+    for (let i = 0; i < 2; i++) {
+      const id = await newJob();
+      await http().post('/v1/provider/location').set(auth(pro.token)).send({ lat: SPOT.lat, lng: SPOT.lng }).expect(200);
+      const code = (await http().get(`/v1/jobs/${id}`).set(auth(cust.token))).body.startCode;
+      await http().post(`/v1/jobs/${id}/start`).set(auth(pro.token)).send({ code }).expect(200);
+      await http().post(`/v1/jobs/${id}/complete`).set(auth(pro.token)).expect(200);
+      await http().post(`/v1/jobs/${id}/pay`).set(auth(cust.token)).send({ method: 'upi' }).expect(200);
+      if (i === 1) await http().post(`/v1/jobs/${id}/dispute`).set(auth(cust.token)).send({ reason: 'OVERCHARGED', details: 'Asked for extra cash' }).expect(200);
+    }
+    let t = (await http().get('/v1/provider/me').set(auth(pro.token))).body.provider.trust;
+    expect(t.onTimePct).toBe(100);
+    expect(t.cleanStreak).toBe(3);
+    expect(t.score).toBe(100); // 0.6×100 + 0.25×100 + 15
+    const d = (await http().get('/v1/admin/disputes').set(auth(admin))).body.find((x: any) => x.provider?.id === pro.id && x.status === 'OPEN');
+    await http().post(`/v1/admin/disputes/${d.id}/resolve`).set(auth(admin)).send({ resolution: 'Refunding the extra charge', refundAmount: 50 }).expect(200);
+    t = (await http().get('/v1/provider/me').set(auth(pro.token))).body.provider.trust;
+    expect(t.overchargeRefunds).toBe(1);
+    expect(t.cleanStreak).toBe(0);
+    expect(t.score).toBe(95);
+    // Customers see it on the job.
+    const id = await newJob();
+    const view = (await http().get(`/v1/jobs/${id}`).set(auth(cust.token))).body;
+    expect(view.provider.trust.score).toBe(95);
+    await http().post(`/v1/jobs/${id}/cancel`).set(auth(cust.token)).send({}).expect(200);
+  });
+
+  it('judges night pricing in IST, whatever the server clock zone', () => {
+    expect(localHour(new Date('2026-11-27T16:45:00Z'))).toBe(22); // 22:15 IST
+    expect(localHour(new Date('2026-11-27T00:15:00Z'))).toBe(5);  // 05:45 IST
+    expect(localHour(new Date('2026-11-27T01:00:00Z'))).toBe(6);  // 06:30 IST
   });
 });
