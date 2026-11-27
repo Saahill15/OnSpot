@@ -276,6 +276,10 @@ describe('review fixes and new features', () => {
     const r = await http().post(`/v1/jobs/${id}/pay`).set(auth(cust.token)).send({ method: 'cash' }).expect(200);
     expect(r.body.status).toBe('COMPLETED');
     expect(r.body.payment.status).toBe('PENDING_CASH');
+    // Reopening the partner app must bring back the "collect cash" job, not just the dashboard.
+    const reopened = (await http().get('/v1/provider/me').set(auth(holder.token)).expect(200)).body;
+    expect(reopened.activeJob?.id).toBe(id);
+    expect(reopened.activeJob.payment.status).toBe('PENDING_CASH');
     await http().post(`/v1/jobs/${id}/cash-received`).set(auth(cust.token)).expect(403); // the customer cannot confirm their own cash
     const other = holder === a ? b : a;
     await http().post(`/v1/jobs/${id}/cash-received`).set(auth(other.token)).expect(403);

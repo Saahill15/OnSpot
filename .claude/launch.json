@@ -1,9 +1,64 @@
 {
   "version": "0.0.1",
   "configurations": [
-    { "name": "onspot", "runtimeExecutable": "node", "runtimeArgs": ["prototype/server.js"], "port": 4000 },
-    { "name": "onspot-api", "runtimeExecutable": "npm", "runtimeArgs": ["--prefix", "apps/api", "run", "dev"], "port": 4100, "url": "http://localhost:4100" },
-    { "name": "onspot-admin", "runtimeExecutable": "npm", "runtimeArgs": ["--prefix", "apps/admin", "run", "dev"], "port": 5173 },
-    { "name": "onspot-mobile-web", "runtimeExecutable": "npm", "runtimeArgs": ["--prefix", "apps/mobile", "run", "web", "--", "--port", "8081"], "port": 8081 }
+    {
+      "name": "onspot",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "prototype/server.js"
+      ],
+      "port": 4000
+    },
+    {
+      "name": "onspot-api",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "apps/api",
+        "run",
+        "dev"
+      ],
+      "port": 4100,
+      "url": "http://localhost:4100"
+    },
+    {
+      "name": "onspot-admin",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "apps/admin",
+        "run",
+        "dev"
+      ],
+      "port": 5173
+    },
+    {
+      "name": "onspot-mobile-web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "apps/mobile",
+        "run",
+        "web",
+        "--",
+        "--port",
+        "8081"
+      ],
+      "port": 8081
+    },
+    {
+      "name": "onspot-mobile-web-partner",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "apps/mobile",
+        "run",
+        "web",
+        "--",
+        "--port",
+        "8082"
+      ],
+      "port": 8082
+    }
   ]
 }

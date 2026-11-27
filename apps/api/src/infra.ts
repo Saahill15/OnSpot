@@ -159,21 +159,32 @@ export interface Garage { name: string; lat: number; lng: number; km: number; ph
 export class PlacesService {
   private log = new Logger('Places');
   private cache = new Map<string, { at: number; data: Garage[] }>();
+  private downUntil = 0; // after a full failure, skip OSM for a while so customers aren't kept waiting
   /** Real car-repair shops near a point. Cached 30 min per ~1 km cell. Returns [] if OSM is unreachable,
-   *  and the app falls back to "choose on map". */
+   *  and the app falls back to "choose on map". Worst-case wait is ~12 s, and then 0 s for the next 2 minutes. */
   async garages(lat: number, lng: number): Promise<Garage[]> {
     const key = `${lat.toFixed(2)}:${lng.toFixed(2)}`;
     const hit = this.cache.get(key);
     if (hit && Date.now() - hit.at < 30 * 60_000) return hit.data;
-    if (config.placesDriver === 'off') return [];
+    if (config.placesDriver === 'off' || Date.now() < this.downUntil) return [];
     const q = `[out:json][timeout:8];(node["shop"="car_repair"](around:20000,${lat},${lng});way["shop"="car_repair"](around:20000,${lat},${lng}););out center 60;`;
     try {
-      const res = await fetch('https://overpass-api.de/api/interpreter', {
-        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'OnSpot/0.1 (roadside assistance app)' },
-        body: 'data=' + encodeURIComponent(q), signal: AbortSignal.timeout(10_000),
-      });
-      if (!res.ok) throw new Error(`overpass ${res.status}`);
-      const out: any = await res.json();
+      // The free public Overpass servers are often overloaded (502/504); try a mirror before giving up.
+      // Production: run our own Overpass instance or use a places API with an SLA.
+      let out: any = null, lastErr = '';
+      for (const url of ['https://overpass-api.de/api/interpreter', 'https://overpass.private.coffee/api/interpreter']) {
+        try {
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json', 'User-Agent': 'OnSpot/0.1 (roadside assistance app)' },
+            body: 'data=' + encodeURIComponent(q), signal: AbortSignal.timeout(6_000),
+          });
+          if (!res.ok) { lastErr = `${new URL(url).host} ${res.status}`; continue; }
+          out = await res.json();
+          break;
+        } catch (e: any) { lastErr = `${new URL(url).host} ${e.message}`; }
+      }
+      if (!out) throw new Error(lastErr);
       const data: Garage[] = (out.elements || [])
         .map((e: any) => ({ lat: e.lat ?? e.center?.lat, lng: e.lon ?? e.center?.lon, name: e.tags?.name, phone: e.tags?.phone || e.tags?.['contact:phone'] }))
         .filter((g: any) => g.lat != null && g.name)
@@ -183,7 +194,8 @@ export class PlacesService {
       this.cache.set(key, { at: Date.now(), data });
       return data;
     } catch (e: any) {
-      this.log.warn(`garage lookup failed: ${e.message}`);
+      this.log.warn(`garage lookup failed: ${e.message}; skipping OSM for 2 min`);
+      this.downUntil = Date.now() + 2 * 60_000;
       return [];
     }
   }

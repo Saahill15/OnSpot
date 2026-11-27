@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OnSpot · Side by side</title>
+  <style>
+    /* Dev tool: customer app, partner app and ops console running at once.
+       Phones render at a real device size (390×844) and are scaled as a whole to fit the window,
+       so their layout never gets squeezed. The two phone apps run on different ports (8081, 8082)
+       so each keeps its own sign-in. */
+    :root { --bg: #F7F7F7; --ink: #222; --muted: #717171; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--ink); font: 14px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .wrap { display: flex; gap: 16px; padding: 12px 16px; height: 100%; }
+    .col { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+    .col h2 { margin: 0; height: 20px; font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; white-space: nowrap; overflow: hidden; }
+    .col h2 span { color: var(--muted); font-weight: 400; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+    .phone-box { position: relative; flex: none; } /* sized by script to the scaled phone */
+    .phone { position: absolute; top: 0; left: 0; width: 406px; height: 860px; transform-origin: top left;
+             border: 8px solid #222; border-radius: 44px; overflow: hidden; background: #fff; box-shadow: 0 12px 40px rgba(0,0,0,.14); }
+    .ops { position: relative; flex: 1; min-height: 0; border-radius: 16px; overflow: hidden; background: #fff; box-shadow: 0 6px 20px rgba(0,0,0,.08); }
+    .ops-inner { position: absolute; top: 0; left: 0; transform-origin: top left; } /* rendered at >= OPS_DESIGN_W, scaled to fit */
+    iframe { width: 100%; height: 100%; border: 0; display: block; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="col"><h2><i class="dot" style="background:#FF385C"></i>Customer app <span>localhost:8081</span></h2>
+      <div class="phone-box"><div class="phone"><iframe src="http://localhost:8081" title="Customer app" allow="geolocation"></iframe></div></div></div>
+    <div class="col"><h2><i class="dot" style="background:#222"></i>Partner app <span>localhost:8082</span></h2>
+      <div class="phone-box"><div class="phone"><iframe src="http://localhost:8082" title="Partner app" allow="geolocation"></iframe></div></div></div>
+    <div class="col" style="flex:1"><h2><i class="dot" style="background:#008A05"></i>Ops console <span>localhost:5173</span></h2>
+      <div class="ops"><div class="ops-inner"><iframe src="http://localhost:5173" title="Ops console"></iframe></div></div></div>
+  </div>
+  <script>
+    // Scale both phones to fit: limited by window height, and by width so the console keeps at least 480px.
+    const PHONE_W = 406, PHONE_H = 860, PAD = 24, HEAD = 28, GAP = 16, OPS_MIN = 480, OPS_DESIGN_W = 640;
+    function fit() {
+      const byHeight = (innerHeight - PAD - HEAD) / PHONE_H;
+      const byWidth = (innerWidth - 2 * GAP - OPS_MIN - 32) / (2 * PHONE_W);
+      const s = Math.max(0.35, Math.min(1, byHeight, byWidth));
+      document.querySelectorAll('.phone').forEach(p => { p.style.transform = `scale(${s})`; });
+      // Phones first: the console's column width depends on them.
+      document.querySelectorAll('.phone-box').forEach(b => { b.style.width = PHONE_W * s + 'px'; b.style.height = PHONE_H * s + 'px'; b.parentElement.style.width = PHONE_W * s + 'px'; /* labels must not widen the column */ });
+      fitOps();
+    }
+    // Console: never narrower than OPS_DESIGN_W; if its column is smaller, render at that width and scale down.
+    function fitOps() {
+      const ops = document.querySelector('.ops'), inner = document.querySelector('.ops-inner');
+      const w = ops.clientWidth, h = ops.clientHeight;
+      if (!w || !h) return;
+      const W = Math.max(w, OPS_DESIGN_W), k = w / W;
+      inner.style.width = W + 'px'; inner.style.height = h / k + 'px'; inner.style.transform = `scale(${k})`;
+    }
+    addEventListener('resize', fit);
+    new ResizeObserver(fitOps).observe(document.querySelector('.ops'));
+    fit();
+  </script>
+</body>
+</html>

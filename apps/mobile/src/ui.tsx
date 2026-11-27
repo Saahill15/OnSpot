@@ -91,3 +91,7 @@ export const st = StyleSheet.create({
   card: { borderWidth: 1, borderColor: C.line, borderRadius: 16, padding: 16, backgroundColor: '#fff', marginBottom: 12 },
   pill: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 99, alignSelf: 'flex-start' },
 });
+
+/** Pins a screen's main action to the bottom of the screen when content is short (scroll area must use flexGrow: 1). */
+export const BottomCTA = ({ children, style }: { children: React.ReactNode; style?: ViewStyle }) =>
+  <View style={[{ marginTop: 'auto', paddingTop: 16 }, style]}>{children}</View>;

@@ -13,6 +13,7 @@ const P: Record<string, string> = {
   alert: '<path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17h.01"/>',
   x: '<path d="M6 6l12 12M18 6 6 18"/>',
   phone: '<path d="M5 3h3l2 5-2.5 1.5a11 11 0 0 0 7 7L16 14l5 2v3a2 2 0 0 1-2 2A17 17 0 0 1 3 5a2 2 0 0 1 2-2z"/>',
+  flag: '<path d="M5 21V4M5 4h11l-2 4 2 4H5"/>',
   tow: '<path d="M14 17V6a1 1 0 0 0-1-1H3v12"/><path d="M14 9h4l3 4v4h-2"/><circle cx="7" cy="17.5" r="2"/><circle cx="17" cy="17.5" r="2"/>',
   puncture: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5"/>',
   fuel: '<path d="M4 21V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v16M3 21h12M14 10h2a2 2 0 0 1 2 2v4a1.5 1.5 0 0 0 3 0V8l-3-3"/>',
@@ -29,7 +30,12 @@ const STATUS: Record<string, string> = { SEARCHING: 'Searching', ASSIGNED: 'On t
 const Status = ({ s }: { s: string }) => <span className={`pill ${s}`}>{STATUS[s] ?? s}</span>;
 
 // ---------------------------------------------------------------- types
-interface Overview { active: number; completed: number; noProvider: number; matchRate: number; avgMatchSec: number; gmv: number; revenue: number; online: number; providers: number; pendingKyc: number; geoIndex: string }
+interface Overview { active: number; completed: number; noProvider: number; matchRate: number; avgMatchSec: number; gmv: number; revenue: number; online: number; providers: number; pendingKyc: number; openDisputes: number; lateNow: number; geoIndex: string }
+interface DisputeRow {
+  id: string; reason: string; details: string; status: 'OPEN' | 'RESOLVED'; resolution: string | null; refundAmount: number; createdAt: string; resolvedAt: string | null;
+  job: { id: string; service: string; status: string; amount: number; maxRefund: number }; customer: { name: string; phone: string }; provider: { id: string; name: string } | null;
+}
+const REASON: Record<string, string> = { OVERCHARGED: 'Overcharged', NO_SHOW: 'Pro did not show up', BAD_SERVICE: 'Problem not fixed', DAMAGE: 'Damage', SAFETY: 'Safety concern', OTHER: 'Other' };
 interface JobRow { id: string; status: string; service: string; total: number; finalAmount: number | null; createdAt: string; customer: { name: string }; provider: { user: { name: string } } | null }
 interface ProviderRow { id: string; name: string; phone: string; services: string[]; vehicleNo: string; online: boolean; onJob: boolean; rating: number; ratingCount: number; jobsDone: number; earnings: number; kycStatus: string; kycDocs: any; suspended: boolean }
 interface Sos { jobId: string; customer: string; phone: string; at: number }
@@ -71,13 +77,14 @@ function Login({ onDone }: { onDone: (s: any) => void }) {
 }
 
 // ---------------------------------------------------------------- console
-type Page = 'overview' | 'jobs' | 'partners';
+type Page = 'overview' | 'jobs' | 'partners' | 'disputes';
 function Console({ onSignOut }: { onSignOut: () => void }) {
   const [page, setPage] = useState<Page>('overview');
   const [ov, setOv] = useState<Overview | null>(null);
   const [live, setLive] = useState<{ providers: LiveProvider[]; jobs: LiveJob[] }>({ providers: [], jobs: [] });
   const [jobs, setJobs] = useState<JobRow[]>([]);
   const [providers, setProviders] = useState<ProviderRow[]>([]);
+  const [disputes, setDisputes] = useState<DisputeRow[]>([]);
   const [sos, setSos] = useState<Sos[]>([]);
   const [open, setOpen] = useState<string | null>(null);
   const [toast, setToast] = useState<{ t: string; err?: boolean } | null>(null);
@@ -85,8 +92,8 @@ function Console({ onSignOut }: { onSignOut: () => void }) {
 
   const flash = (t: string, err = false) => { setToast({ t, err }); window.setTimeout(() => setToast(null), 3500); };
   const load = useCallback(async () => {
-    const [o, l, j, p] = await Promise.all([api<Overview>('/admin/overview'), api('/admin/live'), api<JobRow[]>('/admin/jobs'), api<ProviderRow[]>('/admin/providers')]);
-    setOv(o); setLive(l); setJobs(j); setProviders(p);
+    const [o, l, j, p, d] = await Promise.all([api<Overview>('/admin/overview'), api('/admin/live'), api<JobRow[]>('/admin/jobs'), api<ProviderRow[]>('/admin/providers'), api<DisputeRow[]>('/admin/disputes')]);
+    setOv(o); setLive(l); setJobs(j); setProviders(p); setDisputes(d);
   }, []);
   const soon = useCallback(() => { window.clearTimeout(timer.current); timer.current = window.setTimeout(() => load().catch(() => {}), 250); }, [load]);
 
@@ -99,18 +106,26 @@ function Console({ onSignOut }: { onSignOut: () => void }) {
       setSos(x => [{ ...d, at: Date.now() }, ...x.filter(y => y.jobId !== d.jobId)]);
       try { const a = new AudioContext(); const o = a.createOscillator(); o.frequency.value = 880; o.connect(a.destination); o.start(); o.stop(a.currentTime + 0.4); } catch { /* autoplay blocked */ }
     };
+    const onLate = (d: { provider?: string; minutesLate: number }) => { flash(`${d.provider ?? 'A partner'} is ${d.minutesLate} min late. The customer can switch for free.`, true); soon(); };
+    const onDispute = () => { flash('New problem reported. See Disputes.'); soon(); };
     s.on(EVENTS.JOB_UPDATED, soon); s.on('provider.updated', soon); s.on(EVENTS.PROVIDER_LOCATION, onLoc); s.on(EVENTS.SOS, onSos);
+    s.on('job.late', onLate); s.on('dispute.created', onDispute); s.io.on('reconnect', soon); // reload whatever was missed while offline
     const poll = window.setInterval(soon, 15000); // safety net if a socket event is missed
-    return () => { s.off(EVENTS.JOB_UPDATED, soon); s.off('provider.updated', soon); s.off(EVENTS.PROVIDER_LOCATION, onLoc); s.off(EVENTS.SOS, onSos); window.clearInterval(poll); };
+    return () => {
+      s.off(EVENTS.JOB_UPDATED, soon); s.off('provider.updated', soon); s.off(EVENTS.PROVIDER_LOCATION, onLoc); s.off(EVENTS.SOS, onSos);
+      s.off('job.late', onLate); s.off('dispute.created', onDispute); s.io.off('reconnect', soon); window.clearInterval(poll);
+    };
   }, [load, soon]);
 
   const pendingKyc = providers.filter(p => p.kycStatus === 'SUBMITTED').length;
-  const nav: [Page, string, string, number?][] = [['overview', 'Overview', 'grid'], ['jobs', 'Jobs', 'list'], ['partners', 'Partners', 'users', pendingKyc]];
+  const openDisputes = disputes.filter(d => d.status === 'OPEN').length;
+  const nav: [Page, string, string, number?][] = [['overview', 'Overview', 'grid'], ['jobs', 'Jobs', 'list'], ['partners', 'Partners', 'users', pendingKyc], ['disputes', 'Disputes', 'flag', openDisputes]];
   return (
     <div className="shell">
       <aside className="side">
         <div className="brand"><span className="logo"><Icon n="pin" s={16} /></span>OnSpot <span className="muted" style={{ fontWeight: 500 }}>Ops</span></div>
-        <nav>{nav.map(([k, l, i, c]) => <button key={k} className={`nav ${page === k ? 'on' : ''}`} onClick={() => setPage(k)}><Icon n={i} />{l}{!!c && <span className="count">{c}</span>}</button>)}</nav>
+        <nav>{nav.map(([k, l, i, c]) => <button key={k} className={`nav ${page === k ? 'on' : ''}`} onClick={() => setPage(k)} title={l} aria-label={c ? `${l} (${c})` : l} aria-current={page === k ? 'page' : undefined}><Icon n={i} /><span className="label">{l}</span>{!!c && <span className="count">{c}</span>}</button>)}</nav>
+        <button className="nav signout-compact" onClick={onSignOut} title="Sign out" aria-label="Sign out"><Icon n="out" /></button>
         <div className="foot"><div className="sm" style={{ fontWeight: 600 }}>{getSession()?.user.name}</div><div className="xs muted" style={{ marginBottom: 8 }}>Live · {ov?.geoIndex ?? '…'} geo index</div><button className="nav" style={{ padding: '6px 0' }} onClick={onSignOut}><Icon n="out" />Sign out</button></div>
       </aside>
       <main>
@@ -125,6 +140,7 @@ function Console({ onSignOut }: { onSignOut: () => void }) {
         {page === 'overview' && <OverviewPage ov={ov} live={live} onOpen={setOpen} />}
         {page === 'jobs' && <JobsPage jobs={jobs} onOpen={setOpen} />}
         {page === 'partners' && <PartnersPage providers={providers} reload={load} flash={flash} />}
+        {page === 'disputes' && <DisputesPage disputes={disputes} reload={load} flash={flash} onOpen={setOpen} />}
       </main>
       {open && <JobDrawer id={open} onClose={() => setOpen(null)} />}
       {toast && <div className={`toast ${toast.err ? 'err' : ''}`}>{toast.t}</div>}
@@ -136,7 +152,8 @@ function OverviewPage({ ov, live, onOpen }: { ov: Overview | null; live: { provi
   const k: [string, string, boolean?][] = ov ? [
     ['Partners online', `${ov.online} / ${ov.providers}`], ['Active jobs', String(ov.active)], ['Completed', String(ov.completed)],
     ['Match rate', `${ov.matchRate}%`], ['Avg. time to match', `${ov.avgMatchSec}s`], ['GMV', rupee(ov.gmv)], ['Platform revenue', rupee(ov.revenue)],
-    ['KYC to review', String(ov.pendingKyc), ov.pendingKyc > 0],
+    ['KYC to review', String(ov.pendingKyc), ov.pendingKyc > 0], ['Open disputes', String(ov.openDisputes), ov.openDisputes > 0],
+    ['Partners running late', String(ov.lateNow), ov.lateNow > 0],
   ] : [];
   return (
     <>
@@ -219,6 +236,53 @@ function PartnersPage({ providers, reload, flash }: { providers: ProviderRow[]; 
   );
 }
 
+function DisputesPage({ disputes, reload, flash, onOpen }: { disputes: DisputeRow[]; reload: () => Promise<void>; flash: (t: string, err?: boolean) => void; onOpen: (id: string) => void }) {
+  const [f, setF] = useState<'OPEN' | 'RESOLVED'>('OPEN');
+  const [draft, setDraft] = useState<Record<string, { resolution: string; refund: string }>>({});
+  const rows = disputes.filter(d => d.status === f);
+  const set = (id: string, patch: Partial<{ resolution: string; refund: string }>) => setDraft(x => ({ ...x, [id]: { ...{ resolution: '', refund: '0' }, ...x[id], ...patch } }));
+  const resolve = async (d: DisputeRow) => {
+    const v = draft[d.id] ?? { resolution: '', refund: '0' };
+    try {
+      await api(`/admin/disputes/${d.id}/resolve`, { resolution: v.resolution.trim(), refundAmount: Math.round(+v.refund || 0) });
+      flash(+v.refund ? `Resolved with ${rupee(+v.refund)} refund. Customer notified.` : 'Resolved. Customer notified.');
+      await reload();
+    } catch (e: any) { flash(e.message, true); }
+  };
+  return (
+    <>
+      <div className="page-head"><div><h1>Disputes</h1><div className="muted">Problems customers reported. Refunds are capped at what they paid.</div></div>
+        <div className="seg">{(['OPEN', 'RESOLVED'] as const).map(k => <button key={k} className={f === k ? 'on' : ''} onClick={() => setF(k)}>{k === 'OPEN' ? `Open (${disputes.filter(d => d.status === 'OPEN').length})` : 'Resolved'}</button>)}</div></div>
+      {rows.length === 0 && <div className="panel empty">{f === 'OPEN' ? 'No open disputes. Nice.' : 'Nothing resolved yet.'}</div>}
+      <div style={{ display: 'grid', gap: 14 }}>
+        {rows.map(d => {
+          const v = draft[d.id] ?? { resolution: '', refund: '0' };
+          return (
+            <div key={d.id} className="panel">
+              <div className="row" style={{ flexWrap: 'wrap', marginBottom: 8 }}>
+                <span className={`pill ${d.reason === 'SAFETY' ? 'bad' : 'warn'}`}>{REASON[d.reason] ?? d.reason}</span>
+                <b className="grow">{d.customer.name} <span className="muted sm" style={{ fontWeight: 400 }}>vs {d.provider?.name ?? 'partner'} · {svcName(d.job.service)} · paid {rupee(d.job.amount)}</span></b>
+                <span className="muted xs">{ago(d.createdAt)}</span>
+                <button className="btn sm" onClick={() => onOpen(d.job.id)}>Open job</button>
+              </div>
+              {d.details ? <p className="sm" style={{ margin: '4px 0 12px', color: 'var(--ink-2)' }}>“{d.details}”</p> : <p className="muted sm" style={{ margin: '4px 0 12px' }}>No details given.</p>}
+              {d.status === 'RESOLVED' ? (
+                <div className="sm"><span className="pill ok">Resolved {d.resolvedAt ? ago(d.resolvedAt) : ''}</span> {d.refundAmount ? <b> · {rupee(d.refundAmount)} refunded</b> : null}<div className="muted" style={{ marginTop: 6 }}>{d.resolution}</div></div>
+              ) : (
+                <div className="row" style={{ flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                  <div className="grow" style={{ minWidth: 240 }}><label className="xs muted">Resolution (sent to the customer)</label><input className="input" value={v.resolution} onChange={e => set(d.id, { resolution: e.target.value })} placeholder="e.g. Partner warned; refunding the extra charge" /></div>
+                  <div style={{ width: 140 }}><label className="xs muted">Refund ₹ (max {d.job.maxRefund})</label><input className="input" inputMode="numeric" value={v.refund} onChange={e => set(d.id, { refund: e.target.value.replace(/\D/g, '') })} /></div>
+                  <button className="btn dark" disabled={v.resolution.trim().length < 3 || +v.refund > d.job.maxRefund} onClick={() => resolve(d)}>Resolve</button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </>
+  );
+}
+
 function JobDrawer({ id, onClose }: { id: string; onClose: () => void }) {
   const [j, setJ] = useState<any>(null);
   useEffect(() => {
@@ -251,6 +315,15 @@ function JobDrawer({ id, onClose }: { id: string; onClose: () => void }) {
             {j.providerPayout != null && <div className="li xs"><span>Partner payout</span><span>{rupee(j.providerPayout)}</span></div>}
             {j.payment && <div className="li xs"><span>Payment</span><span>{j.payment.method.toUpperCase()} · {j.payment.ref}</span></div>}
             {j.cancelReason && <div className="li xs"><span>Cancel reason</span><span>{j.cancelReason}{j.cancelFee ? ` · ₹${j.cancelFee} fee` : ''}</span></div>}
+            {j.tip > 0 && <div className="li xs"><span>Tip to partner</span><span>{rupee(j.tip)}</span></div>}
+          </div>
+          {(j.late || j.topRatedOnly || j.payment?.status === 'PENDING_CASH' || j.dispute) && <div className="row" style={{ flexWrap: 'wrap', marginTop: 12 }}>
+            {j.late && <span className="pill warn">Partner running late</span>}
+            {j.topRatedOnly && <span className="pill">Top-rated pros only</span>}
+            {j.payment?.status === 'PENDING_CASH' && <span className="pill warn">Cash, awaiting partner confirmation</span>}
+            {j.dispute && <span className={`pill ${j.dispute.status === 'OPEN' ? 'bad' : 'ok'}`}>Dispute: {REASON[j.dispute.reason] ?? j.dispute.reason} · {j.dispute.status.toLowerCase()}</span>}
+          </div>}
+          <div>{/* keeps the following sections in the drawer's flow */}
           </div>
           {j.messages?.length > 0 && <><div className="sec">Chat</div>{j.messages.map((m: any) => <div key={m.id} className={`msg ${m.from}`}>{m.text}<div className="xs" style={{ opacity: .6 }}>{m.from === 'PROVIDER' ? 'Partner' : 'Customer'} · {hhmm(m.at)}</div></div>)}</>}
           {Object.keys(j.ratings).length > 0 && <><div className="sec">Ratings</div>{Object.entries(j.ratings).map(([by, r]: any) => <div key={by} className="sm">{by === 'CUSTOMER' ? 'Customer → partner' : 'Partner → customer'}: ★ {r.stars}{r.comment ? ` · “${r.comment}”` : ''}</div>)}</>}

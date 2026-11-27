@@ -48,6 +48,30 @@ cd apps/admin
 npm run dev                # ops console on http://localhost:5173 (sign in with 9999999999)
 ```
 
+### See everything side by side
+
+With the API and ops console running, start the mobile web app twice (one per role, each keeps its own sign-in):
+
+```bash
+cd apps/mobile
+npm run web -- --port 8081   # customer
+npm run web -- --port 8082   # partner (second terminal)
+```
+
+Then open **http://localhost:5173/side-by-side.html**: customer app, partner app and ops console in one window, all live. The phones render at a real device size (390×844) and are scaled to fit your window.
+
+### What's in the apps
+
+- **Fair Price Lock**: itemised fare before booking; extras need the customer's in-app approval, and declined extras are never charged.
+- **Cash that can't be faked**: choosing cash leaves the job unpaid until the partner confirms they received it (the prompt survives an app restart).
+- **Late-arrival guard**: if a partner is 10+ minutes past the arrival time they accepted with, the customer can switch to the next nearest pro for free; the partner and ops are told.
+- **Highway safety card** while waiting (hazard lights, behind the barrier, verify the plate before sharing the code) with a **"no internet? send my location by SMS"** fallback.
+- **Top-rated pros only**: optional booking setting, dispatches only to verified pros rated 4.5★+.
+- **Real tow destinations**: nearby garages from OpenStreetMap, or pin a drop point on the map.
+- **Tips** (100% to the partner) and **Report a problem** → ops **Disputes** queue with refunds capped at what was paid.
+- **Partner demand hotspots**: where and when requests happen near them (last 30 days), with directions.
+- Offers expire on the server's clock (no fresh 20 s timer on app reopen); apps and console resync after a network drop.
+
 Ops console: live KPIs, a live map of partners and open requests (updated over Socket.IO), active requests, jobs with a full-detail drawer (bill, extras, chat, ratings, timeline), the KYC queue (approve/reject), partner suspension with a reason sent to the partner, and a red SOS banner with the customer's number the moment an SOS is raised.
 
 ### Push notifications
@@ -75,11 +99,12 @@ End-to-end tests run against a real Nest app, Postgres (`onspot_test`), Redis (d
 | Auth | `POST auth/otp/request`, `POST auth/otp/verify` → JWT |
 | Public | `GET catalog`, `GET track/:id` (family link), `GET health` |
 | Me | `GET/PATCH me` (emergency contacts, vehicle, Shield), `POST me/push-tokens`, `POST me/push-tokens/remove` |
-| Jobs (customer) | `GET jobs/availability`, `POST jobs/quote`, `POST jobs`, `POST jobs/:id/{addons/:aid/decision, pay, rate, messages, sos, cancel}` |
-| Jobs (partner) | `POST jobs/:id/{accept, decline, arrived, start, addons, complete, messages, cancel}` |
-| Partner | `GET/PATCH provider/me`, `POST provider/{kyc, status, location}` |
+| Jobs (customer) | `GET jobs/availability`, `POST jobs/quote`, `POST jobs`, `POST jobs/:id/{addons/:aid/decision, pay, tip, rate, dispute, switch, messages, sos, cancel}` |
+| Jobs (partner) | `POST jobs/:id/{accept, decline, arrived, start, addons, complete, cash-received, messages, cancel}` |
+| Partner | `GET/PATCH provider/me`, `GET provider/hotspots`, `POST provider/{kyc, status, location}` |
+| Places | `GET places/garages?lat&lng` (OpenStreetMap; empty list when unavailable) |
 | Payments | `POST payments/razorpay/verify` |
-| Ops | `GET admin/{overview, live, providers, jobs, jobs/:id}`, `POST admin/providers/:id/{kyc, suspend}` |
+| Ops | `GET admin/{overview, live, providers, jobs, jobs/:id, disputes}`, `POST admin/providers/:id/{kyc, suspend}`, `POST admin/disputes/:id/resolve` |
 
 Realtime (Socket.IO, `auth: { token }`): `job.updated`, `job.offer`, `job.offer_revoked`, `provider.location`, `kyc.updated`, `sos`.
 
@@ -94,6 +119,8 @@ Realtime (Socket.IO, `auth: { token }`): `job.updated`, `job.offer`, `job.offer_
 ## Not done yet (Phase 1 remaining)
 
 - Real SMS (MSG91) for OTP and SOS contacts (currently logged); background location for partners
+- Garage lookup uses the free public OpenStreetMap Overpass servers, which are often overloaded; run our own instance or a paid places API before launch
+- Tips and dispute refunds are recorded but not yet charged/refunded through a payment gateway
 - Push delivery verified only up to the API boundary (tests); needs an EAS project + FCM/APNs credentials and a device to confirm end to end
 - Ops console sign-in uses the same phone OTP; add role-based staff accounts and an audit log before real ops use
 - Razorpay checkout in the app (the server order creation and signature verification exist but are untested without keys)

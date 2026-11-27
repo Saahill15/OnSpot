@@ -7,10 +7,10 @@ import { api, getSocket } from './api';
 import { act, ACTIVE, ChatPanel, confirm, JobView, Stars, toast } from './common';
 import Map from './Map';
 import type { MapMarker } from './mapTypes';
-import { Avatar, Button, C, Card, Divider, hhmm, Icon, IconCircle, Input, Pill, Row, rupee, SERVICE_ICON, T } from './ui';
+import { Avatar, BottomCTA, Button, C, Card, Divider, hhmm, Icon, IconCircle, Input, Pill, Row, rupee, SERVICE_ICON, T } from './ui';
 
 interface Me { id: string; name: string; services: ServiceCode[]; vehicleNo: string; online: boolean; lat: number | null; lng: number | null; rating: number; ratingCount: number; kycStatus: 'PENDING' | 'SUBMITTED' | 'VERIFIED' | 'REJECTED'; earnings: number; jobsDone: number; activeJobId: string | null }
-type Offer = Omit<JobOffer, 'expiresAt'> & { expiresAt?: string; receivedAt: number };
+type Offer = Omit<JobOffer, 'expiresAt'> & { expiresAt?: string; receivedAt: number; ttl: number }; // ttl: seconds left when received (server clock)
 const OFFER_SEC = 20;
 const DEMO = { lat: 18.7546, lng: 73.4062 };
 
@@ -25,7 +25,7 @@ export default function Partner({ onSignOut }: { onSignOut: () => void }) {
 
   const refresh = async () => {
     const d = await api<{ provider: Me; activeJob: JobView | null; offers: any[] }>('/provider/me');
-    setMe(d.provider); setJob(d.activeJob); setOffers(d.offers.map(o => ({ ...o, receivedAt: Date.now() })));
+    setMe(d.provider); setJob(d.activeJob); setOffers(d.offers.map(o => ({ ...o, receivedAt: Date.now(), ttl: o.expiresInSec ?? OFFER_SEC })));
     if (d.provider.lat != null) pos.current = { lat: d.provider.lat, lng: d.provider.lng! };
     api<JobView[]>('/jobs').then(l => setHistory(l.filter(j => ['COMPLETED', 'PAID'].includes(j.status)))).catch(() => {});
   };
@@ -34,12 +34,16 @@ export default function Partner({ onSignOut }: { onSignOut: () => void }) {
   // realtime
   useEffect(() => {
     const s = getSocket(); if (!s) return;
-    const onOffer = (o: JobOffer) => { setOffers(l => [...l.filter(x => x.jobId !== o.jobId), { ...o, receivedAt: Date.now() }]); toast(`New ${SERVICE_BY_CODE[o.service].name.toLowerCase()} request · ${o.km} km away`); };
+    const onOffer = (o: JobOffer) => { setOffers(l => [...l.filter(x => x.jobId !== o.jobId), { ...o, receivedAt: Date.now(), ttl: OFFER_SEC }]); toast(`New ${SERVICE_BY_CODE[o.service].name.toLowerCase()} request · ${o.km} km away`); };
     const onRevoke = ({ jobId }: { jobId: string }) => setOffers(l => l.filter(x => x.jobId !== jobId));
     const onJob = (j: JobView) => setJob(prev => {
       if (prev && prev.id !== j.id && ACTIVE.includes(prev.status)) return prev;
       if (prev && prev.status !== j.status && j.status === 'CANCELLED') toast('The customer cancelled this job', 'err');
       if (prev && prev.status !== j.status && j.status === 'PAID') toast(`Payment received · ${rupee(j.finalAmount)}`, 'ok');
+      if (prev && prev.payment?.status !== 'PENDING_CASH' && j.payment?.status === 'PENDING_CASH') toast(`Collect ${rupee(j.finalAmount)} in cash, then confirm`, 'ok');
+      if (prev && !prev.tip && j.tip) toast(`${j.customer.name} tipped you ${rupee(j.tip)}!`, 'ok');
+      if (prev && !prev.late && j.late) toast("You're running late. The customer can now switch pros.", 'err');
+      if (prev && prev.status === 'ASSIGNED' && j.status === 'SEARCHING') toast('The customer switched to another pro', 'err');
       const pa = prev?.addons.filter(a => a.status !== 'PENDING').length || 0, na = j.addons.filter(a => a.status !== 'PENDING');
       if (prev && na.length > pa) { const a = na[na.length - 1]; toast(`Customer ${a.status === 'APPROVED' ? 'approved' : 'declined'} ${a.label}`, a.status === 'APPROVED' ? 'ok' : 'err'); }
       const last = j.messages?.[j.messages.length - 1];
@@ -47,14 +51,16 @@ export default function Partner({ onSignOut }: { onSignOut: () => void }) {
       return j;
     });
     const onKyc = ({ status }: { status: Me['kycStatus'] }) => { setMe(m => m && { ...m, kycStatus: status }); toast(status === 'VERIFIED' ? 'KYC approved. You can go online now.' : 'KYC rejected. Please resubmit.', status === 'VERIFIED' ? 'ok' : 'err'); };
-    s.on(EVENTS.JOB_OFFER, onOffer); s.on(EVENTS.JOB_OFFER_REVOKED, onRevoke); s.on(EVENTS.JOB_UPDATED, onJob); s.on(EVENTS.KYC_UPDATED, onKyc);
-    return () => { s.off(EVENTS.JOB_OFFER, onOffer); s.off(EVENTS.JOB_OFFER_REVOKED, onRevoke); s.off(EVENTS.JOB_UPDATED, onJob); s.off(EVENTS.KYC_UPDATED, onKyc); };
+    // After a network drop, re-read offers and the active job so nothing is missed.
+    const onReconnect = () => { act(refresh); };
+    s.on(EVENTS.JOB_OFFER, onOffer); s.on(EVENTS.JOB_OFFER_REVOKED, onRevoke); s.on(EVENTS.JOB_UPDATED, onJob); s.on(EVENTS.KYC_UPDATED, onKyc); s.io.on('reconnect', onReconnect);
+    return () => { s.off(EVENTS.JOB_OFFER, onOffer); s.off(EVENTS.JOB_OFFER_REVOKED, onRevoke); s.off(EVENTS.JOB_UPDATED, onJob); s.off(EVENTS.KYC_UPDATED, onKyc); s.io.off('reconnect', onReconnect); };
   }, []);
 
   // offer countdown + auto-decline
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, []);
   useEffect(() => {
-    const expired = offers.filter(o => now - o.receivedAt > OFFER_SEC * 1000);
+    const expired = offers.filter(o => now - o.receivedAt > o.ttl * 1000);
     if (expired.length) { expired.forEach(o => api(`/jobs/${o.jobId}/decline`, { body: {} }).catch(() => {})); setOffers(l => l.filter(o => !expired.includes(o))); }
   }, [now]);
 
@@ -120,7 +126,7 @@ export default function Partner({ onSignOut }: { onSignOut: () => void }) {
     <View style={{ flex: 1, backgroundColor: '#fff' }}>
       <Map height={height * 0.3} center={me.lat != null ? { lat: me.lat, lng: me.lng! } : DEMO} markers={markers}
         route={active?.status === 'ASSIGNED' && me.lat != null ? [{ lat: me.lat, lng: me.lng! }, active.pickup] : null} />
-      <ScrollView style={{ flex: 1, marginTop: -20, backgroundColor: '#fff', borderTopLeftRadius: 22, borderTopRightRadius: 22 }} contentContainerStyle={{ padding: 20, paddingTop: 22, paddingBottom: 48 }} keyboardShouldPersistTaps="handled">
+      <ScrollView style={{ flex: 1, marginTop: -20, backgroundColor: '#fff', borderTopLeftRadius: 22, borderTopRightRadius: 22 }} contentContainerStyle={{ flexGrow: 1, padding: 20, paddingTop: 22, paddingBottom: 24 }} keyboardShouldPersistTaps="handled">
         {!active && offers.map(o => <OfferCard key={o.jobId} o={o} now={now} onAccept={async () => {
           const j = await act(() => api<JobView>(`/jobs/${o.jobId}/accept`, { body: {} }));
           setOffers([]); if (j) { setJob(j); toast('Job accepted. Head to the customer.', 'ok'); } else act(refresh);
@@ -133,7 +139,7 @@ export default function Partner({ onSignOut }: { onSignOut: () => void }) {
 }
 
 function OfferCard({ o, now, onAccept, onDecline }: { o: Offer; now: number; onAccept: () => void; onDecline: () => void }) {
-  const left = Math.max(0, OFFER_SEC - Math.floor((now - o.receivedAt) / 1000));
+  const left = Math.max(0, o.ttl - Math.floor((now - o.receivedAt) / 1000));
   return (
     <View style={{ borderWidth: 1, borderColor: C.line2, borderRadius: 20, padding: 18, marginBottom: 14, backgroundColor: '#fff', shadowColor: '#000', shadowOpacity: 0.12, shadowRadius: 20, shadowOffset: { width: 0, height: 8 }, elevation: 8 }}>
       <Row><IconCircle name={SERVICE_ICON[o.service]} /><View style={{ flex: 1 }}><T s="label" style={{ color: C.accent }}>New request · {SERVICE_BY_CODE[o.service].name}</T><T s="h3">{o.customerName} · {o.km} km away</T>{!!o.pickup.label && <T s="xs" numberOfLines={1}>{o.pickup.label}</T>}</View><Pill tone="accent" text={`${left}s`} /></Row>
@@ -156,7 +162,7 @@ function Dashboard({ me, setMe, history, onToggle, onSignOut }: { me: Me; setMe:
     <>
       <View style={{ backgroundColor: C.ink, borderRadius: 20, padding: 20, marginBottom: 14 }}>
         <T s="label" style={{ color: 'rgba(255,255,255,.7)' }}>Today's earnings</T>
-        <T s="h1" style={{ color: '#fff', fontSize: 40, marginBottom: 14 }}>{rupee(todays.reduce((t, j) => t + (j.providerPayout || 0), 0))}</T>
+        <T s="h1" style={{ color: '#fff', fontSize: 40, marginBottom: 14 }}>{rupee(todays.reduce((t, j) => t + (j.providerPayout || 0) + (j.tip || 0), 0))}</T>
         <Row gap={0} style={{ borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,.15)', paddingTop: 14 }}>
           {[[String(todays.length), 'jobs today'], [`★ ${me.rating.toFixed(1)}`, 'rating'], [rupee(me.earnings), 'all time']].map(([b, l]) => <View key={l} style={{ flex: 1 }}><T s="h3" style={{ color: '#fff' }}>{b}</T><T s="xs" style={{ color: 'rgba(255,255,255,.65)' }}>{l}</T></View>)}
         </Row>
@@ -166,9 +172,10 @@ function Dashboard({ me, setMe, history, onToggle, onSignOut }: { me: Me; setMe:
         <T s="h3" style={{ color: me.online ? C.ok : '#fff' }}>{me.online ? "You're online · tap to go offline" : 'Go online'}</T>
       </Pressable>
       {me.kycStatus !== 'VERIFIED' && <Kyc me={me} setMe={setMe} />}
+      {me.kycStatus === 'VERIFIED' && <Hotspots services={me.services.join(',')} />}
       <T s="h3" style={{ fontSize: 18, marginTop: 12, marginBottom: 10 }}>Recent jobs</T>
       {history.length ? history.slice(0, 5).map(j => <Row key={j.id} gap={12} style={{ paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.line }}>
-        <IconCircle name={SERVICE_ICON[j.service]} size={36} /><View style={{ flex: 1 }}><T s="sm" style={{ fontWeight: '600' }}>{j.customer.name}</T><T s="xs">{SERVICE_BY_CODE[j.service].name} · {hhmm(j.completedAt || j.createdAt)}{j.ratings.CUSTOMER ? ` · ★ ${j.ratings.CUSTOMER.stars}` : ''}</T></View><T s="h3" style={{ fontSize: 14 }}>{rupee(j.providerPayout)}</T>
+        <IconCircle name={SERVICE_ICON[j.service]} size={36} /><View style={{ flex: 1 }}><T s="sm" style={{ fontWeight: '600' }}>{j.customer.name}</T><T s="xs">{SERVICE_BY_CODE[j.service].name} · {hhmm(j.completedAt || j.createdAt)}{j.ratings.CUSTOMER ? ` · ★ ${j.ratings.CUSTOMER.stars}` : ''}{j.tip ? ` · ${rupee(j.tip)} tip` : ''}</T></View><T s="h3" style={{ fontSize: 14 }}>{rupee((j.providerPayout || 0) + (j.tip || 0))}</T>
       </Row>) : <Card soft><T s="sm" style={{ color: C.muted, textAlign: 'center' }}>Your completed jobs and payouts will show here.</T></Card>}
       <T s="h3" style={{ fontSize: 18, marginTop: 22, marginBottom: 10 }}>Services I offer</T>
       <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
@@ -180,6 +187,35 @@ function Dashboard({ me, setMe, history, onToggle, onSignOut }: { me: Me; setMe:
       <Divider />
       <Button kind="danger" title="Sign out" onPress={onSignOut} />
     </>
+  );
+}
+
+interface HotspotData { total: number; peakHour: number | null; hours: number[]; hotspots: { lat: number; lng: number; label: string; requests: number; avgFare: number; km: number }[] }
+const hourLabel = (h: number) => `${h % 12 || 12}${h < 12 ? ' am' : ' pm'}`;
+
+/** Where and when requests for this partner's services happen nearby (last 30 days). Helps them wait in the right place. */
+function Hotspots({ services }: { services: string }) {
+  const [d, setD] = useState<HotspotData | null>(null);
+  useEffect(() => { api<HotspotData>('/provider/hotspots').then(setD).catch(() => {}); }, [services]);
+  if (!d) return null;
+  const max = Math.max(1, ...d.hours);
+  return (
+    <Card>
+      <Row style={{ marginBottom: 4 }}><Icon name="trending-up" size={18} /><T s="h3" style={{ flex: 1 }}>Where jobs happen near you</T></Row>
+      {d.total === 0 ? <T s="xs">No requests nearby in the last 30 days yet. Hotspots will show up as jobs come in.</T> : <>
+        <T s="xs" style={{ marginBottom: 12 }}>{d.total} requests for your services in the last 30 days{d.peakHour != null ? ` · busiest around ${hourLabel(d.peakHour)}` : ''}</T>
+        <View style={{ flexDirection: 'row', alignItems: 'flex-end', height: 48, gap: 2, marginBottom: 4 }} accessibilityLabel="Requests by hour of day">
+          {d.hours.map((n, h) => <View key={h} style={{ flex: 1, height: Math.max(2, (n / max) * 48), borderRadius: 2, backgroundColor: h === d.peakHour ? C.accent : C.line2 }} />)}
+        </View>
+        <Row style={{ justifyContent: 'space-between', marginBottom: 12 }}>{[0, 6, 12, 18].map(h => <T key={h} s="xs">{hourLabel(h)}</T>)}</Row>
+        {d.hotspots.slice(0, 3).map((s, i) => (
+          <Pressable key={i} onPress={() => Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lng}`)} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10, borderTopWidth: 1, borderTopColor: C.line }}>
+            <View style={{ width: 28, height: 28, borderRadius: 14, backgroundColor: i === 0 ? C.accent : C.surface2, alignItems: 'center', justifyContent: 'center' }}><T s="xs" style={{ color: i === 0 ? '#fff' : C.ink, fontWeight: '700' }}>{i + 1}</T></View>
+            <View style={{ flex: 1 }}><T s="sm" style={{ fontWeight: '600' }} numberOfLines={1}>{s.label}</T><T s="xs">{s.requests} requests · avg {rupee(s.avgFare)} · {s.km} km away</T></View>
+            <Icon name="navigation" size={16} color={C.muted} />
+          </Pressable>))}
+      </>}
+    </Card>
   );
 }
 
@@ -214,6 +250,7 @@ function JobPanel({ job, setJob, onSimulate, onDone }: { job: JobView; setJob: (
   const chat = ACTIVE.includes(job.status) && <ChatPanel job={job} me="PROVIDER" onSend={t => api(`/jobs/${job.id}/messages`, { body: { text: t } }).then(setJob)} />;
   if (job.status === 'ASSIGNED') return <>{head}
     <Row style={{ marginBottom: 12 }}><T s="h2" style={{ flex: 1 }}>Head to customer</T><T s="h3" style={{ color: C.accent }}>{job.eta ?? '—'} min</T></Row>
+    {job.late && <Card style={{ backgroundColor: C.warnSoft, borderColor: 'transparent' }}><Row style={{ alignItems: 'flex-start' }}><Icon name="clock" size={18} color={C.warn} /><T s="sm" style={{ flex: 1 }}><T s="sm" style={{ fontWeight: '600' }}>You're past your promised arrival time.</T> The customer can now switch to another pro for free. Message them with an update.</T></Row></Card>}
     <Card soft><Row><T s="sm" style={{ flex: 1 }}>Locked fare</T><T s="h3">{rupee(job.total)}</T></Row>{job.drop && <T s="xs" style={{ marginTop: 4 }}>Tow {job.quote.towKm} km to the drop point</T>}</Card>
     <View style={{ gap: 10 }}>
       <Button kind="dark" icon="navigation" title="Navigate in Google Maps" onPress={() => Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${job.pickup.lat},${job.pickup.lng}`)} />
@@ -239,16 +276,23 @@ function JobPanel({ job, setJob, onSimulate, onDone }: { job: JobView; setJob: (
       </View>}
     </Card>
     <Button kind="dark" title={pending ? 'Waiting for customer approval…' : 'Mark job complete'} disabled={pending} onPress={() => call('complete')} />{chat}</>;
+  if (job.status === 'COMPLETED' && job.payment?.status === 'PENDING_CASH') return <>{head}
+    <View style={{ alignSelf: 'center' }}><IconCircle name="dollar-sign" size={64} bg={C.warnSoft} color={C.warn} /></View>
+    <T s="h2" style={{ textAlign: 'center', marginTop: 12 }}>Collect {rupee(job.finalAmount)} in cash</T>
+    <T s="sm" style={{ textAlign: 'center', color: C.muted, marginVertical: 8 }}>{job.customer.name} chose to pay cash. Confirm only once the money is in your hand. The job isn't paid until you do.</T>
+    <BottomCTA><Button kind="dark" icon="check" title={`I've received ${rupee(job.finalAmount)}`} onPress={async () => { if (await confirm('Confirm cash received?', `Only confirm if ${job.customer.name} has paid you ${rupee(job.finalAmount)}.`, 'Confirm')) await call('cash-received'); }} /></BottomCTA></>;
   if (job.status === 'COMPLETED' || job.status === 'PAID') return <>{head}
     <View style={{ alignSelf: 'center' }}><IconCircle name="check" size={64} bg={C.okSoft} color={C.ok} /></View>
     <T s="h2" style={{ textAlign: 'center', marginTop: 12 }}>{job.status === 'PAID' ? 'Payment received' : 'Job complete'}</T>
-    <T s="sm" style={{ textAlign: 'center', color: C.muted, marginVertical: 8 }}>{job.status === 'PAID' ? `${rupee(job.finalAmount)} via ${job.payment?.method.toUpperCase()}. Payout to your UPI tomorrow.` : `The customer is paying ${rupee(job.finalAmount)} in the app.`}</T>
-    <Card><Row style={{ justifyContent: 'space-between' }}><T s="sm">Customer total</T><T s="sm">{rupee(job.finalAmount)}</T></Row><Row style={{ justifyContent: 'space-between', marginTop: 8 }}><T s="sm">Platform fee + 10% commission</T><T s="sm">− {rupee((job.finalAmount || 0) - (job.providerPayout || 0))}</T></Row><Divider /><Row style={{ justifyContent: 'space-between' }}><T s="h3">You earn</T><T s="h3">{rupee(job.providerPayout)}</T></Row></Card>
+    <T s="sm" style={{ textAlign: 'center', color: C.muted, marginVertical: 8 }}>{job.status === 'PAID' ? `${rupee(job.finalAmount)} via ${job.payment?.method.toUpperCase()}. Payout to your UPI tomorrow.` : `Waiting for ${job.customer.name} to pay ${rupee(job.finalAmount)}.`}</T>
+    <Card><Row style={{ justifyContent: 'space-between' }}><T s="sm">Customer total</T><T s="sm">{rupee(job.finalAmount)}</T></Row><Row style={{ justifyContent: 'space-between', marginTop: 8 }}><T s="sm">Platform fee + 10% commission</T><T s="sm">− {rupee((job.finalAmount || 0) - (job.providerPayout || 0))}</T></Row>
+      {job.tip > 0 && <Row style={{ justifyContent: 'space-between', marginTop: 8 }}><T s="sm" style={{ color: C.ok }}>Tip (100% yours)</T><T s="sm" style={{ color: C.ok }}>+ {rupee(job.tip)}</T></Row>}
+      <Divider /><Row style={{ justifyContent: 'space-between' }}><T s="h3">You earn</T><T s="h3">{rupee((job.providerPayout || 0) + job.tip)}</T></Row></Card>
     {job.status === 'PAID' && !job.ratings.PROVIDER && <><T s="h3" style={{ textAlign: 'center' }}>Rate {job.customer.name}</T><Stars value={stars} onChange={setStars} /></>}
-    <Button title="Back to dashboard" onPress={async () => { if (job.status === 'PAID' && !job.ratings.PROVIDER) await call('rate', { stars }); onDone(); }} /></>;
+    <BottomCTA><Button title="Back to dashboard" onPress={async () => { if (job.status === 'PAID' && !job.ratings.PROVIDER) await call('rate', { stars }); onDone(); }} /></BottomCTA></>;
   return <>{head}
     <View style={{ alignSelf: 'center' }}><IconCircle name="x" size={64} bg={C.dangerSoft} color={C.danger} /></View>
     <T s="h2" style={{ textAlign: 'center', marginTop: 12 }}>Job cancelled</T>
     <T s="sm" style={{ textAlign: 'center', color: C.muted, marginVertical: 8 }}>{job.cancelFee ? `The customer cancelled after you arrived, so they're charged a ${rupee(job.cancelFee)} visit fee.` : 'No action needed.'}</T>
-    <Button title="Back to dashboard" onPress={onDone} /></>;
+    <BottomCTA><Button title="Back to dashboard" onPress={onDone} /></BottomCTA></>;
 }

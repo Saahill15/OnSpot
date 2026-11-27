@@ -7,7 +7,7 @@ import { api, getSession, getSocket } from './api';
 import { act, ACTIVE, ChatPanel, confirm, JobView, Stars, Steps, Timeline, toast } from './common';
 import Map from './Map';
 import type { MapMarker } from './mapTypes';
-import { Avatar, BillLines, Button, C, Card, Divider, hhmm, Icon, IconCircle, IconName, Input, Pill, Row, rupee, SERVICE_ICON, T } from './ui';
+import { Avatar, BillLines, BottomCTA, Button, C, Card, Divider, hhmm, Icon, IconCircle, IconName, Input, Pill, Row, rupee, SERVICE_ICON, T } from './ui';
 
 const DEMO_SPOT = { lat: 18.7546, lng: 73.4062, label: 'Lonavala, Mumbai–Pune Expressway' };
 const SYMPTOMS: [string, ServiceCode, IconName][] = [["Won't start", 'battery', 'battery-charging'], ['Flat tyre', 'puncture', 'disc'], ['Out of fuel', 'fuel', 'droplet'], ["Can't drive it", 'tow', 'truck'], ['Noise or smoke', 'mechanic', 'tool'], ['Locked out', 'locksmith', 'key'], ['Water leak', 'plumber', 'droplet'], ['No power', 'electrician', 'zap']];
@@ -88,7 +88,7 @@ export default function Customer({ onSignOut }: { onSignOut: () => void }) {
   else if (job && ACTIVE.includes(job.status)) body = <LiveTrip job={job} setJob={setJob} me={me} />;
   else if (job && job.status === 'COMPLETED') body = <Bill job={job} setJob={setJob} />;
   else if (job && job.status === 'PAID' && !job.ratings.CUSTOMER) body = <RateJob job={job} setJob={setJob} />;
-  else if (job) body = <Ended job={job} onDone={() => { setJob(null); setSel(null); }} onRetry={() => { setSel(job.service); setJob(null); }} />;
+  else if (job) body = <Ended job={job} setJob={setJob} onDone={() => { setJob(null); setSel(null); }} onRetry={() => { setSel(job.service); setJob(null); }} />;
   else if (sel) body = <QuoteScreen service={sel} spot={spot} me={me} drop={drop} setDrop={setDrop} pickingDrop={pickingDrop} setPickingDrop={setPickingDrop} onBack={() => setSel(null)} onCreated={setJob} onShield={() => setTab('account')} />;
   else body = <Home spot={spot} setSpot={setSpot} avail={avail} onPick={setSel} onLocate={() => locate(true)} />;
 
@@ -103,7 +103,7 @@ export default function Customer({ onSignOut }: { onSignOut: () => void }) {
         {pickingDrop && <View pointerEvents="none" style={{ position: 'absolute', top: 16, left: 16, right: 16, backgroundColor: C.ink, borderRadius: 12, padding: 12 }}><T s="sm" style={{ color: '#fff', textAlign: 'center' }}>Tap the map where the vehicle should be towed</T></View>}
       </View>}
       <ScrollView style={{ flex: 1, marginTop: tab === 'help' ? -20 : 0, backgroundColor: '#fff', borderTopLeftRadius: tab === 'help' ? 22 : 0, borderTopRightRadius: tab === 'help' ? 22 : 0 }}
-        contentContainerStyle={{ padding: 20, paddingTop: tab === 'help' ? 22 : 56, paddingBottom: 40 }} keyboardShouldPersistTaps="handled">
+        contentContainerStyle={{ flexGrow: 1, padding: 20, paddingTop: tab === 'help' ? 22 : 56, paddingBottom: 24 }} keyboardShouldPersistTaps="handled">
         {body}
       </ScrollView>
       <TabBar tab={tab} setTab={setTab} />
@@ -232,11 +232,13 @@ function QuoteScreen({ service, spot, me, drop, setDrop, pickingDrop, setPicking
       </Pressable>
       {me?.vehicle?.model ? <Row style={{ marginVertical: 8 }}><Icon name="truck" size={16} color={C.muted} /><T s="sm" style={{ color: C.muted }}>{me.vehicle.model} · {me.vehicle.plate}</T></Row> : null}
       <Input placeholder="Anything the provider should know? e.g. white Swift, front-left tyre" value={notes} onChangeText={setNotes} multiline style={{ minHeight: 64, textAlignVertical: 'top' }} />
+      <BottomCTA>
       <Divider />
       <Row>
         <View style={{ flex: 1 }}><T s="h2" style={{ fontSize: 20 }}>{q ? rupee(q.quote.total) : '—'} <T s="sm" style={{ color: C.muted }}>total</T></T><Row gap={4}><Icon name="lock" size={12} color={C.ink2} /><T s="xs" style={{ color: C.ink2, textDecorationLine: 'underline' }}>Price locked</T></Row></View>
         <Button title={!ready ? 'Choose a drop point' : q && !q.nearby ? 'No pros nearby' : 'Request'} onPress={request} disabled={!q || !q.nearby} loading={busy} style={{ minWidth: 140 }} />
       </Row>
+      </BottomCTA>
     </>
   );
 }
@@ -385,13 +387,24 @@ function Bill({ job, setJob }: { job: JobView; setJob: (j: JobView) => void }) {
   const [method, setMethod] = useState<'upi' | 'card' | 'cash'>('upi');
   const [busy, setBusy] = useState(false);
   const approved = job.addons.filter(a => a.status === 'APPROVED');
-  const pay = async () => {
+  const pay = async (m = method) => {
     setBusy(true);
-    const r = await act(() => api(`/jobs/${job.id}/pay`, { body: { method } }));
+    const r = await act(() => api(`/jobs/${job.id}/pay`, { body: { method: m } }));
     setBusy(false);
     if (r?.checkout) toast('Opening Razorpay checkout…'); // production: react-native-razorpay with r.checkout, then /payments/razorpay/verify
     else if (r) setJob(r);
   };
+  // Cash: the job is only paid once the partner confirms they received it.
+  if (job.payment?.status === 'PENDING_CASH') return (
+    <>
+      <Steps status="COMPLETED" />
+      <View style={{ alignSelf: 'center', marginTop: 8 }}><IconCircle name="dollar-sign" size={64} bg={C.warnSoft} color={C.warn} /></View>
+      <T s="h2" style={{ textAlign: 'center', marginTop: 14 }}>Pay {rupee(job.finalAmount)} in cash</T>
+      <T s="sm" style={{ textAlign: 'center', color: C.muted, marginTop: 6, marginBottom: 18 }}>Hand it to {job.provider?.name}. They'll confirm in their app, and you'll get a receipt here.</T>
+      <Card soft><Row style={{ alignItems: 'flex-start' }}><Icon name="lock" size={16} /><T s="sm" style={{ flex: 1, color: C.ink2 }}>Pay exactly {rupee(job.finalAmount)}. That's the locked fare{approved.length ? ' plus the extras you approved' : ''}. Nothing more is owed.</T></Row></Card>
+      <BottomCTA><Button kind="outline" title="Pay by UPI instead" onPress={() => pay('upi')} loading={busy} /></BottomCTA>
+    </>
+  );
   return (
     <>
       <Steps status="COMPLETED" />
@@ -404,16 +417,27 @@ function Bill({ job, setJob }: { job: JobView; setJob: (j: JobView) => void }) {
         <Pressable key={v} onPress={() => setMethod(v)} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, borderRadius: 12, borderWidth: method === v ? 2 : 1, borderColor: method === v ? C.ink : C.line2, marginBottom: 8 }}>
           <Icon name={i} size={18} /><T s="sm" style={{ flex: 1, fontWeight: '600' }}>{l}</T><Icon name={method === v ? 'check-circle' : 'circle'} size={18} color={method === v ? C.ink : C.line2} />
         </Pressable>)}
-      <Button title={`Pay ${rupee(job.finalAmount)}`} onPress={pay} loading={busy} style={{ marginTop: 8 }} />
+      <BottomCTA><Button title={method === 'cash' ? `I'll pay ${rupee(job.finalAmount)} in cash` : `Pay ${rupee(job.finalAmount)}`} onPress={() => pay()} loading={busy} /></BottomCTA>
     </>
   );
 }
 
+const TIPS = [20, 50, 100];
 function RateJob({ job, setJob }: { job: JobView; setJob: (j: JobView) => void }) {
   const [stars, setStars] = useState(5);
   const [comment, setComment] = useState('');
+  const [tip, setTip] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    setBusy(true);
+    // Tip first (it needs the job still in PAID), then the rating that moves the screen on.
+    if (tip > 0 && !(await act(() => api(`/jobs/${job.id}/tip`, { body: { amount: tip } })))) { setBusy(false); return; }
+    const r = await act(() => api<JobView>(`/jobs/${job.id}/rate`, { body: { stars, comment } }));
+    setBusy(false);
+    if (r) { setJob(r); if (tip) toast(`Thanks! ${rupee(tip)} sent to ${job.provider?.name}.`, 'ok'); }
+  };
   return (
-    <View style={{ alignItems: 'stretch' }}>
+    <View style={{ flexGrow: 1 }}>
       <View style={{ alignSelf: 'center' }}><IconCircle name="check" size={64} bg={C.okSoft} color={C.ok} /></View>
       <T s="h2" style={{ textAlign: 'center', marginTop: 14 }}>Paid {rupee(job.payment?.amount)}</T>
       <T s="xs" style={{ textAlign: 'center', marginTop: 4 }}>Ref {job.payment?.ref} · {job.payment?.method.toUpperCase()}</T>
@@ -422,23 +446,79 @@ function RateJob({ job, setJob }: { job: JobView; setJob: (j: JobView) => void }
         <Stars value={stars} onChange={setStars} />
         <TextInput value={comment} onChangeText={setComment} placeholder="Anything to share? (optional)" placeholderTextColor="#A0A0A0" multiline style={{ borderWidth: 1, borderColor: C.line2, borderRadius: 10, padding: 12, minHeight: 60, color: C.ink }} />
       </Card>
-      <Button title="Submit rating" onPress={() => act(() => api(`/jobs/${job.id}/rate`, { body: { stars, comment } })).then(r => r && setJob(r))} />
+      <Card>
+        <T s="h3">Add a tip?</T>
+        <T s="xs" style={{ marginBottom: 12 }}>100% goes to {job.provider?.name}. Optional.</T>
+        <Row gap={8}>
+          {[0, ...TIPS].map(t => <Pressable key={t} onPress={() => setTip(t)} accessibilityRole="radio" accessibilityState={{ selected: tip === t }}
+            style={{ flex: 1, alignItems: 'center', paddingVertical: 10, borderRadius: 10, borderWidth: tip === t ? 2 : 1, borderColor: tip === t ? C.ink : C.line2 }}>
+            <T s="sm" style={{ fontWeight: '600' }}>{t ? rupee(t) : 'No tip'}</T></Pressable>)}
+        </Row>
+      </Card>
+      <BottomCTA><Button title={tip ? `Submit and tip ${rupee(tip)}` : 'Submit rating'} onPress={submit} loading={busy} /></BottomCTA>
     </View>
   );
 }
 
-function Ended({ job, onDone, onRetry }: { job: JobView; onDone: () => void; onRetry: () => void }) {
+const DISPUTE_REASONS: [string, string][] = [['OVERCHARGED', 'Charged more than agreed'], ['NO_SHOW', "Pro didn't show up"], ['BAD_SERVICE', 'Problem not fixed'], ['DAMAGE', 'Damage to my vehicle or home'], ['SAFETY', 'I felt unsafe'], ['OTHER', 'Something else']];
+
+/** "Report a problem": goes to the ops Disputes queue; ops can refund up to what was paid. */
+function ReportProblem({ job, onDone, onClose }: { job: JobView; onDone: (j: JobView) => void; onClose: () => void }) {
+  const [reason, setReason] = useState('');
+  const [details, setDetails] = useState('');
+  const [busy, setBusy] = useState(false);
+  const send = async () => {
+    setBusy(true);
+    const r = await act(() => api<JobView>(`/jobs/${job.id}/dispute`, { body: { reason, details } }));
+    setBusy(false);
+    if (r) { onDone(r); toast("Reported. Our team will review it and get back to you.", 'ok'); }
+  };
+  return (
+    <Card>
+      <T s="h3">What went wrong?</T>
+      <T s="xs" style={{ marginTop: 2 }}>Our team reviews every report. If you were overcharged, we refund the difference.</T>
+      <View style={{ gap: 8, marginVertical: 14 }}>
+        {DISPUTE_REASONS.map(([k, l]) => <Pressable key={k} onPress={() => setReason(k)} style={{ flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderRadius: 10, borderWidth: reason === k ? 2 : 1, borderColor: reason === k ? C.ink : C.line2 }}>
+          <Icon name={reason === k ? 'check-circle' : 'circle'} size={16} color={reason === k ? C.ink : C.muted} /><T s="sm">{l}</T></Pressable>)}
+      </View>
+      <Input placeholder="Tell us more (optional)" value={details} onChangeText={setDetails} multiline style={{ minHeight: 64, textAlignVertical: 'top' }} />
+      <Row><Button kind="dark" title="Send report" disabled={!reason} loading={busy} onPress={send} style={{ flex: 1 }} /><Button kind="outline" title="Cancel" onPress={onClose} style={{ flex: 1 }} /></Row>
+    </Card>
+  );
+}
+
+function DisputeStatus({ d }: { d: NonNullable<JobView['dispute']> }) {
+  const resolved = d.status === 'RESOLVED';
+  return (
+    <Card soft>
+      <Row style={{ alignItems: 'flex-start' }}><Icon name={resolved ? 'check-circle' : 'clock'} size={18} color={resolved ? C.ok : C.warn} />
+        <View style={{ flex: 1 }}>
+          <T s="sm" style={{ fontWeight: '600' }}>{resolved ? (d.refundAmount ? `Resolved · ${rupee(d.refundAmount)} refunded` : 'Resolved') : 'Problem reported · under review'}</T>
+          {resolved && d.resolution ? <T s="xs" style={{ marginTop: 2 }}>{d.resolution}</T> : <T s="xs" style={{ marginTop: 2 }}>We usually respond within 24 hours.</T>}
+        </View></Row>
+    </Card>
+  );
+}
+
+function Ended({ job, setJob, onDone, onRetry }: { job: JobView; setJob: (j: JobView) => void; onDone: () => void; onRetry: () => void }) {
+  const [reporting, setReporting] = useState(false);
   const paid = job.status === 'PAID';
   const np = job.status === 'NO_PROVIDER';
+  const canReport = !!job.provider && !job.dispute && ['PAID', 'COMPLETED', 'CANCELLED'].includes(job.status);
   return (
     <View>
       <View style={{ alignSelf: 'center' }}><IconCircle name={paid ? 'check' : 'x'} size={64} bg={paid ? C.okSoft : C.dangerSoft} color={paid ? C.ok : C.danger} /></View>
       <T s="h2" style={{ textAlign: 'center', marginTop: 14 }}>{paid ? "Thanks. You're good to go!" : np ? 'No provider available right now' : 'Request cancelled'}</T>
       <T s="sm" style={{ textAlign: 'center', color: C.muted, marginTop: 6, marginBottom: 18 }}>
-        {paid ? `Receipt ${job.payment?.ref}` : np ? 'We searched up to 50 km. Try again in a minute, or call a helpline.' : job.cancelFee ? `A ₹${job.cancelFee} visit fee applies as the provider had arrived.` : 'No charge was applied.'}
+        {paid ? `Receipt ${job.payment?.ref}${job.tip ? ` · ${rupee(job.tip)} tip` : ''}` : np ? 'We searched up to 50 km. Try again in a minute, or call a helpline.' : job.cancelFee ? `A ₹${job.cancelFee} visit fee applies as the provider had arrived.` : 'No charge was applied.'}
       </T>
       {np && <Card><Row style={{ justifyContent: 'space-between' }}><T s="sm">National emergency</T><Pressable onPress={() => Linking.openURL('tel:112')}><T s="h3">112</T></Pressable></Row><Divider /><Row style={{ justifyContent: 'space-between' }}><T s="sm">NHAI highway helpline</T><Pressable onPress={() => Linking.openURL('tel:1033')}><T s="h3">1033</T></Pressable></Row></Card>}
-      <Row>{!paid && <Button title="Try again" onPress={onRetry} style={{ flex: 1 }} />}<Button kind={paid ? 'primary' : 'outline'} title="Done" onPress={onDone} style={{ flex: 1 }} /></Row>
+      {job.dispute && <DisputeStatus d={job.dispute} />}
+      {reporting && <ReportProblem job={job} onDone={j => { setJob(j); setReporting(false); }} onClose={() => setReporting(false)} />}
+      <BottomCTA>
+        <Row>{!paid && <Button title="Try again" onPress={onRetry} style={{ flex: 1 }} />}<Button kind={paid ? 'primary' : 'outline'} title="Done" onPress={onDone} style={{ flex: 1 }} /></Row>
+        {canReport && !reporting && <Button kind="ghost" small icon="flag" title="Report a problem" onPress={() => setReporting(true)} style={{ alignSelf: 'center', marginTop: 8 }} />}
+      </BottomCTA>
     </View>
   );
 }
@@ -446,17 +526,28 @@ function Ended({ job, onDone, onRetry }: { job: JobView; onDone: () => void; onR
 // ---------------------------------------------------------------- activity + account
 function Activity() {
   const [list, setList] = useState<JobView[] | null>(null);
+  const [open, setOpen] = useState<string | null>(null);
+  const [reporting, setReporting] = useState<string | null>(null);
   useEffect(() => { api<JobView[]>('/jobs').then(setList).catch(() => setList([])); }, []);
   const label: Record<string, string> = { SEARCHING: 'Searching', ASSIGNED: 'On the way', ARRIVED: 'Arrived', IN_PROGRESS: 'In progress', COMPLETED: 'Awaiting payment', PAID: 'Completed', CANCELLED: 'Cancelled', NO_PROVIDER: 'No provider' };
+  const replace = (j: JobView) => setList(l => l && l.map(x => x.id === j.id ? j : x));
   return (
     <>
-      <T s="h1">Activity</T><T s="sm" style={{ color: C.muted, marginBottom: 16 }}>Your requests and receipts.</T>
+      <T s="h1">Activity</T><T s="sm" style={{ color: C.muted, marginBottom: 16 }}>Your requests and receipts. Tap one for details.</T>
       {list === null ? null : list.length === 0 ? <Card soft><T s="sm" style={{ color: C.muted, textAlign: 'center' }}>No requests yet. We hope you never need us, but we're here.</T></Card> :
-        list.map(j => <Row key={j.id} gap={12} style={{ paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: C.line }}>
-          <IconCircle name={SERVICE_ICON[j.service]} size={38} />
-          <View style={{ flex: 1 }}><T s="h3" style={{ fontSize: 15 }}>{SERVICE_BY_CODE[j.service].name}</T><T s="xs">{new Date(j.createdAt).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} · {hhmm(j.createdAt)}{j.provider ? ` · ${j.provider.name}` : ''}</T></View>
-          <View style={{ alignItems: 'flex-end', gap: 4 }}><T s="h3" style={{ fontSize: 14 }}>{rupee(j.finalAmount ?? j.total)}</T><Pill tone={j.status === 'PAID' ? 'ok' : ['CANCELLED', 'NO_PROVIDER'].includes(j.status) ? 'gray' : 'accent'} text={label[j.status]} /></View>
-        </Row>)}
+        list.map(j => <View key={j.id} style={{ borderBottomWidth: 1, borderBottomColor: C.line }}>
+          <Pressable onPress={() => setOpen(open === j.id ? null : j.id)}><Row gap={12} style={{ paddingVertical: 12 }}>
+            <IconCircle name={SERVICE_ICON[j.service]} size={38} />
+            <View style={{ flex: 1 }}><T s="h3" style={{ fontSize: 15 }}>{SERVICE_BY_CODE[j.service].name}</T><T s="xs">{new Date(j.createdAt).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} · {hhmm(j.createdAt)}{j.provider ? ` · ${j.provider.name}` : ''}</T></View>
+            <View style={{ alignItems: 'flex-end', gap: 4 }}><T s="h3" style={{ fontSize: 14 }}>{rupee((j.finalAmount ?? j.total) + (j.tip || 0))}</T><Pill tone={j.dispute ? 'warn' : j.status === 'PAID' ? 'ok' : ['CANCELLED', 'NO_PROVIDER'].includes(j.status) ? 'gray' : 'accent'} text={j.dispute ? (j.dispute.status === 'RESOLVED' ? 'Report resolved' : 'Reported') : label[j.status]} /></View>
+          </Row></Pressable>
+          {open === j.id && <View style={{ paddingBottom: 12 }}>
+            {j.payment && <T s="xs" style={{ marginBottom: 8 }}>Paid {rupee(j.payment.amount)} via {j.payment.method.toUpperCase()} · ref {j.payment.ref}{j.tip ? ` · ${rupee(j.tip)} tip` : ''}</T>}
+            {j.dispute && <DisputeStatus d={j.dispute} />}
+            {reporting === j.id ? <ReportProblem job={j} onDone={x => { replace(x); setReporting(null); }} onClose={() => setReporting(null)} />
+              : !j.dispute && j.provider && ['PAID', 'COMPLETED', 'CANCELLED'].includes(j.status) && <Button kind="outline" small icon="flag" title="Report a problem" onPress={() => setReporting(j.id)} style={{ alignSelf: 'flex-start' }} />}
+          </View>}
+        </View>)}
     </>
   );
 }

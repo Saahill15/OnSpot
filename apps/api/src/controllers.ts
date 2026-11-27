@@ -143,8 +143,13 @@ export class ProviderController {
 
   @Get('me') async me(@CurrentUser() u: AuthUser) {
     const p = await this.db.provider.findUniqueOrThrow({ where: { userId: u.sub }, include: { user: true } });
-    const active = p.activeJobId ? jobView(await this.jobs.load(p.activeJobId), 'provider') : null;
-    return { provider: this.view(p), activeJob: active, offers: active ? [] : await this.jobs.offersFor(u.sub) };
+    let active = p.activeJobId ? jobView(await this.jobs.load(p.activeJobId), 'provider') : null;
+    if (!active) {
+      // A finished job where the customer chose cash still needs the partner to confirm receipt, even after an app restart.
+      const cash = await this.db.job.findFirst({ where: { providerId: u.sub, status: 'COMPLETED', payment: { status: 'PENDING_CASH' } }, orderBy: { completedAt: 'desc' }, select: { id: true } });
+      if (cash) active = jobView(await this.jobs.load(cash.id), 'provider');
+    }
+    return { provider: this.view(p), activeJob: active, offers: p.activeJobId ? [] : await this.jobs.offersFor(u.sub) };
   }
   private view(p: any) {
     return { id: p.userId, name: p.user?.name, services: p.services, vehicleNo: p.vehicleNo, online: p.online, lat: p.lat, lng: p.lng, rating: +p.rating.toFixed(2), ratingCount: p.ratingCount, kycStatus: p.kycStatus, suspended: p.suspended, earnings: p.earnings, jobsDone: p.jobsDone, activeJobId: p.activeJobId };

@@ -228,6 +228,8 @@ export class JobsService implements OnModuleInit, OnModuleDestroy {
         jobId: j.id, service: j.service, km: p?.lat != null ? +roadKm(p as LatLng, { lat: j.pickupLat, lng: j.pickupLng }).toFixed(1) : null, fare: j.total,
         payout: providerPayout(j.total, j.platformFee), pickup: { lat: j.pickupLat, lng: j.pickupLng, label: j.pickupLabel }, customerName: j.customer.name,
         expiresAt: new Date(sentAt + config.offerTtlSec * 1000).toISOString(),
+        // Seconds left by the server's clock; phones' clocks can be minutes off, so apps count down from this.
+        expiresInSec: Math.max(0, Math.round((sentAt + config.offerTtlSec * 1000 - Date.now()) / 1000)),
       };
     });
   }
